@@ -1,6 +1,0 @@
-FADA primary source: https://arxiv.org/html/2606.28476
-RMA primary source: https://ashish-kmr.github.io/rma-legged-robots/
-SplitAdapter primary source: https://arxiv.org/html/2606.03297
-ICE-Cal method authority: /Users/chengyuxuan/ArtiIntComVis/ICE-Cal/note/fada/contracts/active/method/FADA-CONTEXT-METHOD-v006.md
-ICE-Cal design inspector: /Users/chengyuxuan/ArtiIntComVis/ICE-Cal/note/architecture/concept/09_in_context_execution_calibration_design_inspector.data.json
-FADA teaser image provenance: /Users/chengyuxuan/ArtiIntComVis/awesome-humanoid-execution-alignment/pptx/main_figures/source_manifest.json

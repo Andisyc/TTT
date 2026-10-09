@@ -1,9 +1,0 @@
-base_commit=1a70c885928d7892091deb36e26ab0ba11f5469e
-branch=codex/context-differentiable-trajectory
-requested_boundary=paired data collection and training setup without optimizer steps
-contract=FADA-CONTEXT-METHOD-v003,FADA-CONTEXT-TRAIN-v002
-changed_owners=trajectory_data,trajectory_collector,training_setup,preflight_composition_root
-preserved=healthy reference is target; fault probe is Context input; Planner and IDM frozen
-forbidden=privileged gain as Context input; action or free delta_z labels; optimizer updates
-runtime_receipt=note/fada/evidence/2026-08-12-context-pretraining-boundary.md
-test_receipt=34 focused tests passed; Ruff passed; Pyright passed

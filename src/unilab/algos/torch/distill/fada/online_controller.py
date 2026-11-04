@@ -6,7 +6,7 @@ import copy
 import math
 from dataclasses import dataclass
 from numbers import Integral
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
@@ -32,8 +32,11 @@ class FADAOnlineAdaptationConfig:
     lora_rank: int = 8
     lora_alpha: float = 16.0
     lora_dropout: float = 0.05
+    mode: Literal["trajectory_base", "action_base", "trajectory_lora"] = "trajectory_base"
 
     def __post_init__(self) -> None:
+        if self.mode not in ("trajectory_base", "action_base", "trajectory_lora"):
+            raise ValueError(f"unsupported online target mode: {self.mode!r}")
         for name in ("window_size", "update_interval"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
@@ -58,7 +61,7 @@ class FADAOnlineAdaptationConfig:
 
 
 class OnlineAdaptationController:
-    """Share one policy between action generation and snapshot-label regression."""
+    """Generate fixed targets before each LoRA update using the selected reference."""
 
     def __init__(
         self,
@@ -74,13 +77,15 @@ class OnlineAdaptationController:
         max_grad_norm: float | None = 1.0,
         device: str | torch.device = "cpu",
         playback: Any | None = None,
+        mode: Literal["trajectory_base", "action_base", "trajectory_lora"] = "trajectory_base",
     ) -> None:
         FADAOnlineAdaptationConfig(
             enabled=True, window_size=window_size, gamma=gamma, sigma=sigma,
             warmup_steps=warmup_steps, update_interval=update_interval, learning_rate=lr,
             max_grad_norm=max_grad_norm, lora_rank=lora_config.rank,
-            lora_alpha=lora_config.alpha, lora_dropout=lora_config.dropout,
+            lora_alpha=lora_config.alpha, lora_dropout=lora_config.dropout, mode=mode,
         )
+        self.mode = mode
         self.device = torch.device(device)
         self.runtime_spec = get_fada_runtime_spec(policy)
         if playback is None and self.runtime_spec.family == "official":
@@ -136,9 +141,10 @@ class OnlineAdaptationController:
             and self._step_count % self.update_interval == 0
             and self.collector.ready
         ):
+            reference_idm = self.policy.idm if self.mode == "trajectory_lora" else self.base_idm
             samples = build_expert_samples(
-                self.base_idm, self.collector.get_window(), gamma=self.gamma,
-                runtime_spec=self.runtime_spec,
+                reference_idm, self.collector.get_window(), gamma=self.gamma,
+                runtime_spec=self.runtime_spec, mode=self.mode,
             )
             stats = self.updater.update(samples)
             self.collector.clear_window()

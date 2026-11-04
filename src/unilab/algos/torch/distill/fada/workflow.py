@@ -10,6 +10,7 @@ from omegaconf import DictConfig, OmegaConf
 from unilab.algos.torch.distill.fada.persistent_workflow import run_fada_persistent_async
 from unilab.algos.torch.distill.fada.workflow_setup import (
     FADAWorkflowDependencies,
+    resolve_official_fada_execution,
     resolve_official_fada_setup,
 )
 
@@ -30,6 +31,7 @@ def run_fada_training_owner(
     )
     if not isinstance(performance_enabled, bool):
         raise ValueError("training.fada.performance.enabled must be a boolean")
+    execution_limits, pending_raw_budget_bytes = resolve_official_fada_execution(cfg, spec=spec)
     return run_fada_persistent_async(
         spec=spec,
         model_config=model_config,
@@ -38,4 +40,6 @@ def run_fada_training_owner(
         request_timeout_seconds=timeout,
         runtime_factory=dependencies.build_official_fada_runtime,
         performance_enabled=performance_enabled,
+        execution_limits=execution_limits,
+        pending_raw_budget_bytes=pending_raw_budget_bytes,
     )

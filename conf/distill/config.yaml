@@ -280,6 +280,7 @@ demo:
 
 online_adaptation:
   enabled: false
+  mode: trajectory_base  # Full method; action_base / trajectory_lora select ablations 1 / 2.
   window_size: 10
   warmup_steps: 40
   gamma: 0.05

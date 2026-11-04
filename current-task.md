@@ -17,6 +17,11 @@ Current identity:
 - 运行环境：`.tmp/official_fada/runtime-pinned`，优先使用原bydmic的Python3.11/IsaacSim5.1/Torch2.7.0+cu128/NumPy1.26.0；缺包装在独立overlay，TTT已有发行包仅作末尾路径回退。原两个环境未修改；较早被中止的 `.tmp/official_fada/runtime` 不用于训练。
 - 正式配置：`--config-name official_fada`，只将环境数设为256并采用180秒shadow超时；保留batch4096、warmup2000、DAgger30轮/每轮1000更新及20个弱checkpoint来源。CPU限定0–27、BLAS/OpenMP各4线程、GPU0；性能计时开启，不宣称加速。
 - 当前任务状态（2026-10-31）：正式训练 exit 0，累计30轮/32000更新；最终checkpoint严格恢复与有限性通过。原生学生/Oracle同初态直行各20秒通过，学生vx RMSE 0.08158m/s，Oracle 0.03794m/s。MuJoCo原接口阻塞及转弯角速度坐标系错误已修复，最终学生完成固定 seed 的 41.6 秒整圈八字。原验收保留于 acceptance/，后续迁移证据在 sim2sim/；原生与跨后端结论分别记录。
+Goal: 将官方 FADA 的 G1 Locomotion Oracle→Planner–IDM 源训练接入 TTT，复用 UniLab 的进程/调度基础设施，产物可供现有播放与在线适应使用；接通后测量并优化吞吐。
+Do not: 本地实现与CPU验收已交付，不自动连接服务器、下载/安装、运行原生仿真/GPU训练或benchmark，不操作Git/机器人。保留模型/loss/采样与更新量、strict-shadow、最新策略和checkpoint/cache契约；不新增AMP/compile或policy lag。未经用户服务器正确性与同工作量性能证据，不关闭整体原生/加速验收，不以CPU结果宣称GPU倍率。
+
+Current identity:
+- 当前任务状态：6.1–6.5本地代码与对应CPU场景已完成。官方Hydra/脚本owner默认使用共享收发、finite pipeline、内存发布和单flight提交；过渡磁盘/顺序分支已删除。预算解析、warmup/两轮、strict恢复及提交失败关闭通过。现有服务器进程未热切换；CUDA、原生shadow和实际端到端性能仍待用户验证，无已证实加速倍率。
 - 官方参考：LeCAR-Lab/FADA，commit `290b3a9c5c0ebe2e9851b61350617544be05e9bc`；若实施前版本变化，只按固定版本实现，升级另作明确决定。
 - 本地入口：`scripts/train_distill.py:run_fada_training`；配置组 `conf/distill/`；FADA owner 为 `src/unilab/algos/torch/distill/fada/`。
 - 历史实验：v24 checkpoint 为 66/29/3、H=30/K=6，仅保留既有实验用途，不当成官方学生权重或默认可转换产物。
@@ -107,6 +112,7 @@ Progress:
   - Evidence：主Agent统一CPU场景3项PASS（本轮终端）：非单位缩放/非零默认角/关节重排/相位、原生前向与不可变快照；正式session完整K步成熟、实际LoRA-only更新、Planner/base不变及reset保留Adam；旧schema2播放/更新和官方format分流、缺失/错配profile在创建env前拒绝。首次场景发现partial reset泄漏上个episode动作，修复后同场景通过。诊断transition不是物理仿真；临时脚本/模型已清理。
   - Done when / Depends on：代码实施无需重做；完整验收仍需第1步真实官方权重/run配置绑定、第4步相关原生前置和运行授权，再通过正式session关闭/开启更新的真实短运行。当前不宣称sim2sim、负重效果或加速。
 
+<<<<<<< HEAD
 - [ ] 6. 测量并实现有依据的训练提速（6A完成；6B–6D待运行前置及实测）。
   - **目标 / Preserve**：在相同硬件、官方checkpoint/初始学生、配置、env/rollout/batch/更新量、source比例、strict-label、采样顺序/seed、cache状态与权重版本条件下衡量端到端吞吐。区分官方原生→TTT的整合收益与TTT改前→改后的优化收益；不把不同工作量或缓存命中当算法加速。
   - [x] **6A 测量接线**：新增轻量`fada/timing.py`复用已有StageObservationAccumulator；`workflow.py`与`conf/distill/official_fada.yaml`提供默认关闭的`training.fada.performance.enabled`，不进入原生算法配置/缓存/checkpoint。`persistent_workflow.py`汇总worker耗时，计量初始化、RPC、artifact/Replay、batch、学习、保存/发布和close；`replay.py`记录原始sample与H2D。结果在warmup/每轮/close后由现有日志输出，最终返回performance，无新进度/报告/哈希体系。
@@ -124,3 +130,48 @@ Blockers:
 
 Next:
 - 本次 sim2sim 交付完成，等待用户下一项需求；不自动重训、调参或扩展仿真/测试。fada heartbeat 保持暂停。
+=======
+- [ ] 6. 官方FADA接入UniLab高吞吐数据与执行架构（6A及6.1–6.5本地实现/CPU验收完成；原生GPU与端到端性能证据待用户）。
+  - Preserve：同工作量、同原始13字段/source/episode/strict标签、同采样与随机调用顺序、同loss/两optimizer更新和每轮最新权重。保留唯一正式入口、Runner/shadow生命周期、旧学生播放和持久化恢复；不移植APPO算法或新增第二个完整训练循环。
+  - [x] 6A 已有计时与CPU等价证据：正式入口、resident worker、raw v8、NumPy Replay、真实Torch learner/两AdamW、checkpoint与共享权重的warmup+两轮DAgger，计时OFF/ON的模型/loss/RNG/发布轨迹一致（本轮前终端证据，临时脚本已清理）。现有`[FADA PERF]`继续复用；GPU端到端性能未验证。
+  - [x] **6.1 冻结加速接口、内存预算与执行边界（代码及CPU契约验证完成）**。
+    - `collection_contract.py`：新增`official_raw_transition_layout`/`official_window_batch_layout`，现有raw/window validator复用唯一shape/dtype布局；H/K动态，保持13/9字段、原调用、CPU/device/finite/非负ID/mask后缀与零填充拒绝规则。
+    - 新增`execution_contract.py`：完整实现`FADAExecutionLimits`、字节核算、双槽chunk行数和预取预算检查、`FADAChunkDescriptor.validate`及成功阶段提交检查。描述符对照现有request与调用方游标/槽位代次；不从chunk序号猜跨request的代次。预算明确只覆盖声明的buffer，不冒充全进程内存限制。
+    - Multi Agent：按用户本轮明确要求，在主Agent冻结`Mapping[str, (shape, torch.dtype)]`后，A独占布局文件，B独占执行契约且不导入A的新函数，二者无未来产物依赖；主Agent准备独立输入、集成与统一验证。子Agent仅做局部静态/导入检查，未开review或测试套件。
+    - Evidence：主Agent一次`PYTHONPATH=src OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 uv run --frozen --no-sync python /tmp/ttt-fada-step61-1793353892394/verify.py`，终端4项PASS：不同H/K的真实tensor经现有from_mapping/validate；bool/int32/int64（大ID）、mask/finite/device；独立字节核算、预算不足与错误request/source/version/slot/代次/partial尾块拒绝；阶段缺失/超额抽取/剩余批次拒绝，Python/NumPy/Torch RNG未变。临时场景已清理，README已更新。
+    - Boundary：没有分配共享内存/锁或实现预取线程、CUDA搬运；没有改Runner/RPC、入口/YAML、模型/loss/optimizer、artifact/checkpoint格式。字段布局和纯校验不证明真实并发安全。6.2/6.3可据此细化并独立实现，调度接线仍属6.4。
+  - [x] **6.2 共享内存原始轨迹通道（显式收发分支与CPU集成完成；默认路由未切换）**。
+    - 主Agent落地`ipc/shared_tensor_protocol.py`、request显式`transport_id`/空输出路径和官方factory端点注入。A独占新增`ipc/shared_tensor_channel.py`，B独占新增`fada/shared_collection.py`及collector共享分支，两者并行、通过已落地结构协议解耦。无额外review；子Agent实际额外执行了局部静态/行为检查，不将其当正式集成证据。
+    - typed双槽通道在发布后可见、lease退出后释放，背压不覆盖、代次跨请求连续；creator独占unlink，attached只close。元数据与payload分离，共享内存容量预检包含固定metadata/header开销。FADA接收泵先于阻塞RPC启动，按行数/字节上限分配自有暂存，核准尾块、结果与来源/版本/Oracle及预处理身份后才返回完整raw batch。
+    - worker共享请求在采样前验证端点/ID/布局，传输失败永久abort且不回落磁盘；非共享artifact调用保持显式旧路径。无raw轨迹写盘/hash交接，未改变native采集helper、模型/loss/配额/RNG、公共Runner、Replay/learner或存储格式。
+    - Evidence：主Agent`PYTHONPATH=src OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 uv run --frozen --no-sync python /tmp/ttt-fada-step62/verify.py`一次运行4项PASS：真实spawn/Runner/prepare/SharedWeightSync/collector共享分支连续两次请求、双槽多块/partial、bool/int32/int64大ID与顺序/自有数据保持、无raw文件；resident worker退出及段不可重attach；背压释放/取消；producer失败、坏版本、暂存预算拒绝且无接收线程泄漏。仅native资源bootstrap/物理采样由明确CPU诊断替身提供，未跑原生/GPU/模型前向或训练，临时脚本已清理。
+    - Scope：公开收发与factory注入可调用；正式`persistent_workflow`默认仍是artifact路径，切换/发布/持久化集成仍属6.4–6.5。未跑项目测试套件或独立审查，不宣称已实现跨轮采学重叠或取得速度提升。README已记录调用与资源所有权。
+  - [x] **6.3 学习端预取与搬运流水线（可调用接口与CPU对照完成，CUDA未实测）**。
+    - Multi Agent：主Agent冻结有限阶段batch lease/预算和`collect_metrics`接口、在修改前保存临时参考；A新增`batch_pipeline.py`，B仅改`official_learning.py`指标边界；两者同批并行。现有Replay CPU接口够用，`replay.py`未改；无额外review/项目测试套件，子Agent做了局部静态检查。
+    - `OfficialFADABatchPipeline`：单worker按原`sample_update(mode,device='cpu')`顺序采样；planned次数、全部host/device槽与临时采样峰值受预算约束。context-managed租约只在消费期间有效；CPU不用CUDA，CUDA显式device/pinned/copy stream，ready/consumed事件保护读取/复用，失败/阶段结束等待自有工作。主Agent集成纠正显式CUDA分配、部分拷贝失败fence及首次分配流→copy流顺序；这些GPU分支未经本机实测。
+    - `OfficialFADALearner.update(...,collect_metrics=True)`默认保留全部报告字段/原Python加权口径；False仅省去指标计算与回传，完整更新/计数仍执行。报告标量集中物化，无多步autograd图缓存。未删Planner零系数前向、合并来源或改任何算法/增强/精度参数。
+    - Evidence：主Agent一次`PYTHONPATH=src OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 uv run --frozen --no-sync python /tmp/ttt-fada-step63/verify.py`，3项PASS。实际Replay采样owner/官方小型Transformer learner，offline2步+mixed3步，在噪声/dropout/裁剪下对照改前参考：窗口/配额/mask、loss/梯度/两AdamW/权重/计数/Python-NumPy-Torch RNG逐项完全相同；全指标与仅阶段末指标一致；零阶段、预算不足无抽样、producer/consumer错误与未完成阶段拒绝、无sampler线程泄漏。外部Replay存储明确替换为诊断NumPy窗口（不冒充官方Replay/物理采集重验）；临时参考和脚本已清理。
+    - Boundary：6.3不改模型/配额/存储格式；pipeline已在6.4接线并于6.5成为官方默认，无跨轮旧策略采集。CPU证据不证明CUDA pinned/stream/event真实运行、显存峰值或速度。
+  - [x] **6.4 内存发布、配对持久化与正式外循环接线（实现与CPU集成完成，已由6.5设为默认）**。
+    - Multi Agent：A修改`runtime/persistent_runtime.py`内存激活，B新增`fada/persistence.py`单flight提交器；主Agent接通`persistent_workflow.py`及`replay.py`raw事务入库。使用既有Runner、共享权重/收发、有限pipeline和保存/strict-load，无第二训练循环或新checkpoint格式；未加review/项目测试套件，子Agent仅做局部静态检查。
+    - `activate_checkpoint(path,state_dict=...)`严格验证现有布局/float32/finite后同步发布，loader/torch.load不参与；默认文件调用保持。`run_fada_persistent_async`新增显式`execution_limits`/`pending_raw_budget_bytes`，CLI/YAML未改；共享slot在spawn前创建，收发按真实prepare身份/行数预算核准，offline/online复用原Replay事务/筛选/重映射规则，无raw文件交接。
+    - 单一学习循环消费pipeline；采样线程使用独立CPU recorder，阶段join后主线程合并计时，末步收集指标。学习完成→内存发布→submit配对存盘→下一轮采集到自有暂存→wait提交成功→入Replay/学习。存盘期间状态只读，不深拷贝Replay；最后一轮/返回/关闭等writer，无多采集。模型/两optimizer/计数与Replay配对原子提交，历史引用保留，外部resume不删除；发布与已提交进度分开。
+    - Evidence：主Agent一次`PYTHONPATH=src OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 uv run --frozen --no-sync python /tmp/ttt-fada-step64/verify.py`，4项PASS：真实Runner/SharedWeightSync/collector共享分支/pipeline/learner/保存，warmup+两轮与顺序参考的模型/两AdamW/计数/Replay大小/末步指标一致，内存发布loader调用0、无raw落盘；确定性事件阻住writer仍能开始下一轮最新权重采集，但入Replay等提交；strict恢复续第3轮不重复warmup；Replay写完checkpoint提交前注入失败，旧latest配对和历史引用有效，无writer/receiver/sampler残留。native与外部NumPy存储为明确诊断实现，不冒充物理/上游Replay验证；临时参考、输入和脚本已清理。
+    - RNG/范围说明：顺序参考特意用fork_rng隔离推理loader临时模型初始化；新内存路径移除该额外初始化，因此不声称与未经隔离的旧文件路线逐位RNG一致。6.3已有同采样/学习RNG下的严格数值对照。6.4未改算法/采样量/precision、公共Runner生命周期、checkpoint/schema或CLI默认值；CUDA/性能仍未实测，README已更新。
+  - [ ] **6.5 正式配置切换与交付验收（本地子项完成；服务器正确性/性能待用户）**。
+    - [x] 默认配置：`conf/distill/official_fada.yaml`新增独立`training.fada.execution`，transport128MiB/prefetch1GiB/pending raw2GiB、双传输槽/双学习槽。`workflow_setup.py:resolve_official_fada_execution(cfg,spec=...)`拒绝缺键/未知键/bool/非正整数和不够承载声明工作量的组合；与native config/保存算法/source身份隔离。不猜设备/工作量、不自动降采样或fallback。
+    - [x] 唯一正式路径：`workflow.py`自动解析和传入必需预算，保留旧setup五元组及teacher override。`persistent_workflow.py`只走共享raw收发/事务入库、finite pipeline、内存发布、单flight提交，删除磁盘/source_batches、顺序学习/同步轮次保存及其helper/imports。校正batch_build覆盖真正获取lease的等待，不包含学习。通用runtime文件激活、artifact缓存/API和checkpoint/schema未删改。
+    - [x] Multi Agent与交付：A独占配置/解析，B独占外循环，主Agent接composition并统一CPU验收。未新增review/项目套件；子Agent未执行项目测试。README启动/恢复/性能命令及预算、/dev/shm、提交屏障与口径限制已更新，无新增流程报告，临时参考/脚本/诊断输入已清理。
+    - Evidence：主Agent一次`PYTHONPATH=src OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 uv run --frozen --no-sync python /tmp/ttt-fada-step65/verify.py`，4项PASS：Hydra compose→实际scripts.train_distill.run_fada_training→正式owner/真实Runner/共享collector/pipeline/发布/保存，warmup+两轮与6.4显式路径的权重/两AdamW/计数/末步指标一致；预算错误在model/worker前拒绝，default共享端点生效、loader调用0、无raw交接文件；strict恢复续第3轮且不重复warmup，预算未进保存算法/source身份；提交失败保持旧配对，worker/线程/共享段回收，既有[FADA PERF]输出实际执行。native/外部NumPy存储为明确诊断实现，不冒充原生或GPU。未跑全套测试/仿真/benchmark。
+    - [ ] 用户服务器验收：上传更新代码后以真实官方产物/原生环境验证CUDA/strict-shadow、发布/恢复与资源回收，再在相同GPU、初始状态、env/H/K/batch/source配额/更新量/cache口径下对照已有基线，分开冷启动和稳态、实际transition/update数、端到端耗时及RAM/VRAM峰值。提交报告可能包含已采集的下一轮，不逐行误算物理耗时或相加重叠包络。缺真实改善证据时报告未证实提速；不自动连接或重跑服务器任务。
+  - Frozen interfaces：raw字段/类型与流式消费、slot所有权和内存上限；batch/RNG/阶段结束屏障；最新发布版本与checkpoint/Replay提交边界。公共接口/配置由主Agent单写，A/B不互改文件或等待对方未来产物。
+  - Multi Agent执行波次：6.1主Agent先冻结共享接口；6.2 A与6.3 B同批并行，主Agent负责公共接线；6.4主Agent集成后进入6.5。每步开始再用engineering-plan细化具体符号、允许/禁止范围和唯一近端证明，不一次展开全部函数方案。
+  - 唯一未决语义：真正跨轮“采集下一轮＋学习当前轮”并行需要允许有界策略滞后，属于DAgger时序改变；当前默认不允许，不因接UniLab而悄悄开启。现有APPO ring只支持float32且覆盖过期槽，FADA需typed无损适配，不是加几项字段即可照搬。
+  - 总体规划阶段的只读证据：核对APPO ring/staging与FADA原始字段、版本和生命周期差异，两个scout明确传输/持久化边界；后续实现和CPU证据见6.1–6.5子项。实际GPU速度仍受collector/shadow/学习占比制约，不预设倍率。
+
+Blockers:
+- 唯一外部验收缺口：用户尚未提供更新后正式默认路径的服务器运行/原生CUDA正确性及同工作量性能对照。现有服务器任务不会热切换代码，不能用本机CPU诊断替代GPU计时、原生shadow或策略效果。所有已授权本地实现已交付，不再追加“收尾阶段”、扫描旧权重或重复CPU场景；按用户要求不连接服务器。
+
+Next:
+- 用户上传当前代码并按README启动或恢复，反馈真实错误或性能记录后按具体证据处理；当前无待执行的本地实现。保留6.5/原第6步整体待服务器验收，不宣称已加速、不自动启动训练。
+>>>>>>> 674954faf65b10b43223b68dfd8e73080945f7aa

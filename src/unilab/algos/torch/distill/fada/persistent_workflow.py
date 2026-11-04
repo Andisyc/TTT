@@ -8,10 +8,17 @@ NPZ offline caches admit reuse, finalize the offline replay (original
 trajectory train/val split + freeze), run ``warmup_train_steps`` offline-mode
 updates under the original ``load_warmup_ckpt``/``force_warmup_train``
 precedence, then run ``dagger_iters`` rounds of online raw collection,
-parent-side trajectory subsample/split, mixed-mode updates, checkpoint save and
-weight activation. The parent alone owns the student, both optimizers, all
-counters and the final normal close; the worker owns the native env/trainer/
+parent-side trajectory subsample/split, mixed-mode updates and weight
+activation. The parent alone owns the student, both optimizers, all counters
+and the final normal close; the worker owns the native env/trainer/
 strict-shadow and never trains.
+
+Every collection goes over the bounded shared-memory transport into the
+parent's own raw staging (``pending_raw_budget_bytes``), so no raw trajectory is
+handed over as a file. Learning consumes that staging through the finite batch
+pipeline, the learner's latest weights are published in memory, and one
+single-flight committer persists each round's Replay snapshot plus checkpoint
+pair while the next round's collection is already running.
 
 Resume restores the learner (model, both optimizers, update counter) plus the
 parent counters (``rollout_step_count``, ``completed_iterations``,
@@ -25,6 +32,9 @@ from __future__ import annotations
 import json
 import math
 import random
+import sys
+import uuid
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -32,6 +42,7 @@ import numpy as np
 import torch
 
 from unilab.algos.torch.distill.fada.async_runtime import build_official_fada_runtime
+from unilab.algos.torch.distill.fada.batch_pipeline import OfficialFADABatchPipeline
 from unilab.algos.torch.distill.fada.checkpoint import (
     load_official_fada_checkpoint,
     load_official_fada_student_checkpoint,
@@ -42,6 +53,13 @@ from unilab.algos.torch.distill.fada.collection_contract import (
     OFFICIAL_FADA_SOURCE_REVISION,
     OfficialFADACollectRequest,
     OfficialFADACollectionSpec,
+    OfficialFADARawTransitionBatch,
+    official_raw_transition_layout,
+)
+from unilab.algos.torch.distill.fada.execution_contract import (
+    FADAExecutionLimits,
+    layout_nbytes,
+    raw_chunk_rows,
 )
 from unilab.algos.torch.distill.fada.official_learning import (
     OfficialFADALearner,
@@ -51,12 +69,15 @@ from unilab.algos.torch.distill.fada.official_model import (
     build_official_fada_student,
     canonical_official_model_config,
 )
+from unilab.algos.torch.distill.fada.persistence import FADAIterationCommitter
 from unilab.algos.torch.distill.fada.replay import OfficialFADAReplayBuffer
-from unilab.algos.torch.distill.fada.source_artifact import (
-    open_official_fada_source_artifact,
+from unilab.algos.torch.distill.fada.shared_collection import (
+    collect_shared_raw,
+    raw_transport_layout,
 )
 from unilab.algos.torch.distill.fada.timing import FADAPerformanceRecorder, measure
 from unilab.algos.torch.distill.runtime.async_runtime import DaggerPrepareRequest
+from unilab.ipc.shared_tensor_channel import SharedTensorChannel
 
 __all__ = ["run_fada_persistent_async"]
 
@@ -128,73 +149,6 @@ def _source_identity(metadata: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
-def _artifact_identity_matches(
-    metadata: Mapping[str, Any],
-    request: OfficialFADACollectRequest,
-    *,
-    worker_pid: int,
-) -> bool:
-    """Bind the artifact to the exact phase-role request, not just base fields."""
-
-    base_match = all(
-        metadata.get(name) == getattr(request, name)
-        for name in (
-            "request_id",
-            "scenario",
-            "iteration",
-            "checkpoint_path",
-            "expected_weight_version",
-        )
-    )
-    role_match = (
-        metadata.get("source") == request.source
-        and metadata.get("weak_checkpoint") == request.weak_checkpoint
-        and metadata.get("sample_unit") == "transition"
-    )
-    return (
-        base_match
-        and role_match
-        and metadata.get("observed_weight_version") == request.expected_weight_version
-        and metadata.get("producer_pid") == worker_pid
-    )
-
-
-def _collect_raw(
-    runtime: Any,
-    spec: OfficialFADACollectionSpec,
-    request: OfficialFADACollectRequest,
-    *,
-    performance: FADAPerformanceRecorder | None = None,
-) -> tuple[Any, int]:
-    """Collect one new identity-bound raw artifact; never overwrite an existing transaction."""
-
-    artifact_path = Path(request.output_path)
-    if artifact_path.exists():
-        raise FileExistsError(f"refusing to recollect over an existing artifact: {artifact_path}")
-    with measure(performance, "total_elapsed", group="collector_rpc"):
-        result = runtime.collect(request)
-    if performance is not None:
-        performance.add_worker_metrics(result.metrics, source=request.source)
-        performance.increment(f"raw_transitions.{request.source}", int(result.num_samples))
-        performance.increment(f"collector_requests.{request.source}")
-    if result.num_samples <= 0:
-        raise ValueError(
-            f"official collection returned no raw transitions: {result.num_samples}"
-        )
-    with measure(performance, "cumulative_aggregation", group="artifact_read"):
-        loaded = open_official_fada_source_artifact(artifact_path, spec=spec)
-    if not _artifact_identity_matches(
-        loaded.metadata, request, worker_pid=int(result.worker_pid)
-    ):
-        raise ValueError("official collected artifact identity mismatch against its request")
-    if int(loaded.num_samples) != int(result.num_samples):
-        raise ValueError(
-            "official artifact/result sample mismatch: "
-            f"artifact={loaded.num_samples} result={result.num_samples}"
-        )
-    return loaded, int(loaded.metadata["collected_steps"])
-
-
 def _set_global_seed(seed: int) -> None:
     """Mirror upstream ``set_seed``: global np.random/torch drive replay + dropout."""
 
@@ -238,6 +192,8 @@ def run_fada_persistent_async(
     model_config: Mapping[str, Any],
     device: str,
     output_dir: Path,
+    execution_limits: FADAExecutionLimits,
+    pending_raw_budget_bytes: int,
     request_timeout_seconds: float = 300,
     runtime_factory: Callable[..., Any] = build_official_fada_runtime,
     performance_enabled: bool = False,
@@ -252,12 +208,28 @@ def run_fada_persistent_async(
     target_device = torch.device(device)
     if not isinstance(performance_enabled, bool):
         raise ValueError("performance_enabled must be a boolean")
+    if not isinstance(execution_limits, FADAExecutionLimits):
+        raise TypeError(
+            "official FADA training requires FADAExecutionLimits execution_limits, "
+            f"got {type(execution_limits).__name__}"
+        )
+    if (
+        isinstance(pending_raw_budget_bytes, bool)
+        or not isinstance(pending_raw_budget_bytes, int)
+        or pending_raw_budget_bytes <= 0
+    ):
+        raise ValueError(
+            "official FADA training requires a positive integer pending_raw_budget_bytes, "
+            f"got {pending_raw_budget_bytes!r}"
+        )
+    channel: SharedTensorChannel
+    # Assigned once the DAgger phase builds its single-flight writer; the close
+    # barrier below drains it before the runtime closes.
+    committer: FADAIterationCommitter | None = None
     performance = FADAPerformanceRecorder(device=target_device) if performance_enabled else None
     outcome: dict[str, Any] | None = None
     run_dir = Path(output_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir = run_dir / "source_batches"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = (run_dir / "checkpoints" / "student_latest.pt").resolve()
 
     # The resident worker is built with the explicit initial student; its shared
@@ -265,13 +237,24 @@ def run_fada_persistent_async(
     with measure(performance, "cold_start", group="parent_setup"):
         _set_global_seed(int(spec.config.get("seed", 42)))
         initial_student = build_official_fada_student(canonical_model_config, device="cpu")
-        runtime = runtime_factory(
-            spec=spec,
-            student_loader=load_official_fada_student_checkpoint,
-            initial_student=initial_student,
-            request_timeout_seconds=float(request_timeout_seconds),
-            **({"performance_enabled": True} if performance_enabled else {}),
+        capacity = raw_chunk_rows(official_raw_transition_layout(spec, 1), execution_limits)
+        channel = SharedTensorChannel.create(
+            raw_transport_layout(spec, execution_limits, max_rows=capacity),
+            slots=execution_limits.slots,
         )
+        try:
+            runtime = runtime_factory(
+                spec=spec,
+                student_loader=load_official_fada_student_checkpoint,
+                initial_student=initial_student,
+                request_timeout_seconds=float(request_timeout_seconds),
+                **({"performance_enabled": True} if performance_enabled else {}),
+                shared_endpoint=channel.endpoint,
+                shared_timeout_seconds=float(request_timeout_seconds),
+            )
+        except BaseException:
+            channel.cleanup()
+            raise
     try:
         with measure(performance, "cold_start", group="prepare_rpc"):
             prepared = runtime.prepare(DaggerPrepareRequest(request_id="official-fada-prepare"))
@@ -316,6 +299,91 @@ def run_fada_persistent_async(
                 source_identity=expected_identity,
                 performance=performance,
             )
+
+        def _train(mode: str, count: int) -> dict[str, float]:
+            """One bounded update stage: prefetched batches through the finite pipeline."""
+            last: dict[str, float] = {}
+            original_recorder = replay._performance
+            sampling_recorder = (
+                FADAPerformanceRecorder(device="cpu") if performance is not None else None
+            )
+            # Never mutate the learner's recorder from the sampler thread.
+            replay._performance = sampling_recorder
+            try:
+                with OfficialFADABatchPipeline(
+                    sample_cpu=replay.sample_update, spec=spec,
+                    training_config=training_config, mode=mode,
+                    planned_updates=count, device=target_device, limits=execution_limits,
+                ) as pipeline:
+                    for index in range(count):
+                        # Entering the lease is what actually waits for a staged batch, so the
+                        # batch_build window covers acquisition, not the learner update.
+                        with ExitStack() as lease:
+                            with measure(
+                                performance, "learner_batch_staging", group="batch_build"
+                            ):
+                                idm_batches, planner_batch = lease.enter_context(
+                                    pipeline.batch()
+                                )
+                            with measure(
+                                performance, "total_elapsed", group="learner_update"
+                            ):
+                                last = learner.update(
+                                    idm_batches, planner_batch,
+                                    collect_metrics=index == count - 1,
+                                )
+            finally:
+                replay._performance = original_recorder
+            if sampling_recorder is not None:
+                report = sampling_recorder.summary()
+                performance.add_worker_metrics(
+                    {f"{key}_seconds": value for key, value in report["wall_seconds"].items()},
+                    source="cpu_sampler",
+                )
+                for name, value in report["counters"].items():
+                    performance.increment(name, value)
+            return last
+
+        def _collect(
+            request: OfficialFADACollectRequest,
+        ) -> tuple[OfficialFADARawTransitionBatch, int]:
+            steps = (
+                math.ceil(request.collect_steps / num_envs)
+                if request.collect_steps is not None else int(resolved_config[
+                    "rollout_steps_per_iter" if request.source == "online"
+                    else "warmup_max_steps_per_episode"
+                ])
+            )
+            max_rows = steps * num_envs
+            if layout_nbytes(official_raw_transition_layout(spec, max_rows)) > pending_raw_budget_bytes:
+                raise ValueError("pending raw budget cannot retain this collection transaction")
+            with measure(performance, "total_elapsed", group="collector_rpc"):
+                batch, result = collect_shared_raw(
+                    runtime, request, channel, spec=spec, max_rows=max_rows,
+                    pending_budget_bytes=pending_raw_budget_bytes,
+                    expected_metadata=metadata, timeout=float(request_timeout_seconds),
+                )
+            if performance is not None:
+                performance.add_worker_metrics(result.metrics, source=request.source)
+                performance.increment(f"raw_transitions.{request.source}", batch.num_samples)
+                performance.increment(f"collector_requests.{request.source}")
+            return batch, int(result.metadata["collected_steps"])
+
+        def _admit(
+            batch: OfficialFADARawTransitionBatch,
+            source: str,
+            required_length: int | None = None,
+        ) -> int:
+            return replay.add_raw_batch(
+                batch, metadata={**metadata, "source": source},
+                required_length=required_length,
+            )
+
+        def _activate() -> int:
+            with measure(performance, "weight_sync", group="publication"):
+                return runtime.activate_checkpoint(
+                    checkpoint_path, state_dict=learner.policy.state_dict()
+                )
 
         completed_iterations = 0
         samples_seen = 0
@@ -376,10 +444,10 @@ def run_fada_persistent_async(
                 rollout_step_count=rollout_step_count,
                 online_buffer_path=online_target,
             )
-        with measure(performance, "weight_sync", group="publication"):
-            weight_version = runtime.activate_checkpoint(checkpoint_path)
+        weight_version = _activate()
 
         request_counter = 0
+        collection_iteration = completed_iterations
 
         def _request(source: str, weak_checkpoint: str | None, collect_steps: int | None) -> OfficialFADACollectRequest:
             nonlocal request_counter
@@ -387,15 +455,14 @@ def run_fada_persistent_async(
             return OfficialFADACollectRequest(
                 request_id=f"official-fada-{request_counter:04d}-v{weight_version}",
                 scenario=OFFICIAL_FADA_SCENARIO,
-                iteration=completed_iterations,
+                iteration=collection_iteration,
                 checkpoint_path=str(checkpoint_path),
-                output_path=str(
-                    (artifact_dir / f"official-{source}-{request_counter:04d}.pt").resolve()
-                ),
+                output_path="",
                 expected_weight_version=weight_version,
                 source=source,  # type: ignore[arg-type]
                 weak_checkpoint=weak_checkpoint,
                 collect_steps=collect_steps,
+                transport_id=channel.transport_id,
             )
 
         # ── Offline optimal collection (original warmup budget, cache reuse) ──
@@ -429,8 +496,8 @@ def run_fada_persistent_async(
                 ) from exc
         if not bool(cache_stats.get("optimal_offline_cache_hit")):
             # Upstream _collect_optimal_offline_data: fixed-horizon per-env
-            # rollouts; each shard keeps only complete episodes (len==horizon,
-            # last done, exactly one done). Episode mode runs exactly
+            # rollouts; each collected batch keeps only complete episodes
+            # (len==horizon, last done, exactly one done). Episode mode runs exactly
             # warmup_episodes rollouts; step-budget mode loops until the target
             # with the original 10-rollout zero-progress failure threshold.
             kept_steps = 0
@@ -443,12 +510,9 @@ def run_fada_persistent_async(
                     break
                 if not episode_mode and kept_steps >= optimal_target_steps:
                     break
-                artifact, _ = _collect_raw(
-                    runtime, spec, _request("optimal", None, horizon_budget),
-                    performance=performance,
-                )
+                batch, _ = _collect(_request("optimal", None, horizon_budget))
                 with measure(performance, "cumulative_aggregation", group="replay_admission"):
-                    kept = replay.add_artifact(artifact, required_length=horizon)
+                    kept = _admit(batch, "optimal", required_length=horizon)
                 kept_steps += kept
                 samples_seen += kept
                 rollouts += 1
@@ -487,12 +551,9 @@ def run_fada_persistent_async(
             while suboptimal_kept < suboptimal_target:
                 weak = weak_checkpoints[weak_index % len(weak_checkpoints)]
                 weak_index += 1
-                artifact, _ = _collect_raw(
-                    runtime, spec, _request("suboptimal", weak, horizon_budget),
-                    performance=performance,
-                )
+                batch, _ = _collect(_request("suboptimal", weak, horizon_budget))
                 with measure(performance, "cumulative_aggregation", group="replay_admission"):
-                    suboptimal_kept += replay.add_artifact(artifact)
+                    suboptimal_kept += _admit(batch, "suboptimal")
             samples_seen += suboptimal_kept
         if not bool(cache_stats.get("offline_cache_hit")):
             with measure(performance, "checkpoint_save", group="offline_cache"):
@@ -526,13 +587,7 @@ def run_fada_persistent_async(
             warmup_loaded = True
         if not resume_path_value and not warmup_loaded and int(resolved_config["warmup_train_steps"]) > 0:
             with measure(performance, "total_elapsed", group="warmup_train"):
-                for _ in range(int(resolved_config["warmup_train_steps"])):
-                    with measure(performance, "learner_batch_staging", group="batch_build"):
-                        idm_batches, planner_batch = replay.sample_update(
-                            mode="offline", device=target_device
-                        )
-                    with measure(performance, "total_elapsed", group="learner_update"):
-                        learner.update(idm_batches, planner_batch)
+                _train("offline", int(resolved_config["warmup_train_steps"]))
             with measure(performance, "checkpoint_save", group="warmup_model"):
                 save_official_fada_checkpoint(
                     warmup_ckpt_path,
@@ -551,8 +606,7 @@ def run_fada_persistent_async(
                 samples_seen=samples_seen, source_identity=expected_identity,
                 rollout_step_count=rollout_step_count, online_buffer_path=online_target,
             )
-        with measure(performance, "weight_sync", group="publication"):
-            weight_version = runtime.activate_checkpoint(checkpoint_path)
+        weight_version = _activate()
         if performance is not None:
             print("[FADA PERF] " + json.dumps(
                 {"phase": "warmup_complete", **performance.summary()}, sort_keys=True
@@ -569,80 +623,66 @@ def run_fada_persistent_async(
             )
         checkpoints_dir = run_dir / "checkpoints"
         checkpoints_dir.mkdir(parents=True, exist_ok=True)
-        run_token = f"{request_counter:04d}"
-        current_online_snapshot: Path | None = None
+        run_token = f"{request_counter:04d}-{uuid.uuid4().hex}"
+        writer = FADAIterationCommitter(
+            checkpoint_path=checkpoint_path, checkpoints_dir=checkpoints_dir,
+            run_token=run_token, save_every_iter=save_every_iter, dagger_iters=dagger_iters,
+            save_online_buffer=bool(resolved_config.get("save_online_buffer", True)),
+        )
+        # ``writer`` is the non-optional local handle the DAgger closures use; the outer
+        # ``committer`` slot exists only so the close barrier can drain it.
+        committer = writer
         last_metrics: dict[str, float] = {}
+
+        def _wait_commit() -> None:
+            nonlocal completed_iterations, online_target
+            committed = writer.wait()
+            if committed is None:
+                return
+            completed_iterations = committed.completed_iterations
+            online_target = committed.online_buffer_path
+            if performance is not None:
+                performance.add_worker_metrics(
+                    {f"{name}_seconds": value for name, value in committed.wall_seconds.items()},
+                    source="persistence",
+                )
+                performance.increment("online_iterations")
+                print("[FADA PERF] " + json.dumps(
+                    {"phase": "dagger", "iteration": completed_iterations,
+                     "weight_version": weight_version, **performance.summary()}, sort_keys=True,
+                ), flush=True)
+
         for it in range(start_iteration + 1, dagger_iters + 1):
-            artifact, collected_steps = _collect_raw(
-                runtime, spec, _request("online", None, None), performance=performance,
-            )
-            samples_seen += int(artifact.num_samples)
+            batch, collected_steps = _collect(_request("online", None, None))
+            # Collection only fills its own bounded staging area. The previous
+            # learner/Replay state remains read-only until its paired save commits.
+            _wait_commit()
+            samples_seen += int(batch.num_samples)
             with measure(performance, "cumulative_aggregation", group="replay_admission"):
-                replay.process_online_artifact(
-                    artifact,
+                replay.process_online_batch(
+                    batch,
                     sample_ratio=float(resolved_config["online_rollout_sample_ratio"]),
                     val_ratio=float(resolved_config["val_trajectory_ratio"]),
                     seed=seed, rollout_step_count=rollout_step_count,
                 )
             rollout_step_count += int(collected_steps)
             with measure(performance, "total_elapsed", group="dagger_train"):
-                for _ in range(train_steps_per_iter):
-                    with measure(performance, "learner_batch_staging", group="batch_build"):
-                        idm_batches, planner_batch = replay.sample_update(
-                            mode="mixed", device=target_device
-                        )
-                    with measure(performance, "total_elapsed", group="learner_update"):
-                        last_metrics = learner.update(idm_batches, planner_batch)
-            # Persist a counter-tagged online snapshot before the checkpoint so a
-            # resume never pairs the committed weights with a stale replay.
-            if bool(resolved_config.get("save_online_buffer", True)):
-                next_snapshot = checkpoints_dir / f"online_buffer_{run_token}_iter_{it:04d}.npz"
-                with measure(performance, "checkpoint_save", group="online_replay"):
-                    replay.save_online_buffer(next_snapshot)
-            else:
-                next_snapshot = None
-            with measure(performance, "checkpoint_save", group="iteration_model"):
-                save_official_fada_checkpoint(
-                    checkpoint_path,
-                    learner,
-                    completed_iterations=it,
-                    samples_seen=samples_seen,
-                    source_identity=expected_identity,
-                    rollout_step_count=rollout_step_count,
-                    online_buffer_path=next_snapshot,
-                )
-            completed_iterations = it
-            if it % save_every_iter == 0 or it == dagger_iters:
-                # latest is replaced atomically, so this inode remains an immutable snapshot.
-                (checkpoints_dir / f"student_iter_{it:04d}.pt").hardlink_to(checkpoint_path)
-            # Only retire prior snapshots created in this run, after the new
-            # checkpoint commits; user-supplied resume files are never touched.
-            if (
-                current_online_snapshot is not None
-                and next_snapshot is not None
-                and current_online_snapshot != next_snapshot
-                and current_online_snapshot.name.startswith(f"online_buffer_{run_token}_")
-            ):
-                current_online_snapshot.unlink(missing_ok=True)
-                current_online_snapshot.with_name(
-                    f"{current_online_snapshot.stem}_val.npz"
-                ).unlink(missing_ok=True)
-            current_online_snapshot = next_snapshot
-            # Publish every round, independent of save_every_iter, so the next
-            # collection never observes a stale policy.
+                last_metrics = _train("mixed", train_steps_per_iter)
+            collection_iteration = it
+            # Publish this round's latest weights before the next collection sees
+            # them; the commit of the same round is waited for at the top of the loop.
             if it < dagger_iters:
-                with measure(performance, "weight_sync", group="publication"):
-                    weight_version = runtime.activate_checkpoint(checkpoint_path)
-            if performance is not None:
-                performance.increment("online_iterations")
-                print("[FADA PERF] " + json.dumps(
-                    {"phase": "dagger", "iteration": it, "weight_version": weight_version,
-                     **performance.summary()}, sort_keys=True
-                ), flush=True)
+                weight_version = _activate()
+            writer.submit(
+                learner, replay, completed_iterations=it, samples_seen=samples_seen,
+                source_identity=expected_identity, rollout_step_count=rollout_step_count,
+            )
+        _wait_commit()
 
         outcome = {
             "mode": "official_fada_training",
             "execution_mode": "persistent_async",
+            "shared_execution": True,
             "checkpoint_path": str(checkpoint_path),
             "completed_iterations": completed_iterations,
             "samples_seen": samples_seen,
@@ -661,9 +701,21 @@ def run_fada_persistent_async(
         }
         return outcome
     finally:
-        # One normal close on every path, success or failure.
+        primary_error = sys.exc_info()[1]
+        cleanup_errors: list[BaseException] = []
         with measure(performance, "cleanup"):
-            runtime.close()
+            if primary_error is not None:
+                channel.abort()
+            close_actions = [runtime.close, channel.cleanup]
+            if committer is not None:
+                close_actions.insert(0, committer.close)
+            for cleanup in close_actions:
+                try:
+                    cleanup()
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+        if primary_error is None and cleanup_errors:
+            raise cleanup_errors[0]
         if performance is not None and outcome is not None:
             report = performance.summary(finished=True)
             report["scope"] = "training_owner_initialization_through_close"

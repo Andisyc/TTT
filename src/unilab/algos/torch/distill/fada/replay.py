@@ -683,7 +683,31 @@ class OfficialFADAReplayBuffer:
             artifact.spec.prediction_horizon != self.spec.prediction_horizon
         ):
             raise ValueError("official replay H/K identity mismatch")
-        metadata = artifact.metadata
+        return self._add_raw_transaction(
+            tuple(artifact.iter_batches()), artifact.metadata, required_length=required_length
+        )
+
+    def add_raw_batch(
+        self,
+        batch: OfficialFADARawTransitionBatch,
+        *,
+        metadata: Mapping[str, Any],
+        required_length: int | None = None,
+    ) -> int:
+        """Admit a verified in-memory collection with the artifact transaction rules."""
+
+        if not isinstance(batch, OfficialFADARawTransitionBatch):
+            raise TypeError("official memory admission requires a raw transition batch")
+        batch.validate(self.spec)
+        return self._add_raw_transaction((batch,), metadata, required_length=required_length)
+
+    def _add_raw_transaction(
+        self,
+        shards: tuple[OfficialFADARawTransitionBatch, ...],
+        metadata: Mapping[str, Any],
+        *,
+        required_length: int | None,
+    ) -> int:
         if (
             validate_official_fada_preprocessing(metadata["preprocessing"])
             != self.preprocessing
@@ -696,7 +720,6 @@ class OfficialFADAReplayBuffer:
         if self._expert_identity is not None and identity != self._expert_identity:
             raise ValueError("official replay cannot mix expert or experiment identities")
         source = str(metadata["source"])
-        shards = tuple(artifact.iter_batches())
         if not shards:
             raise ValueError("official source artifact must contain at least one shard")
         # One remap offset per artifact: shards of one collection share the

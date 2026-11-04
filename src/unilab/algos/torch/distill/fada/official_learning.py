@@ -42,6 +42,12 @@ Semantics preserved exactly:
 - ``idm_action_loss_horizon_gamma`` defaults to 0.0 (first-action-only
   supervision); the weighted-horizon MSE is evaluated exactly as upstream for
   any explicit gamma in ``[0, 1]``.
+- ``update(..., collect_metrics=False)`` is a reporting-only switch: it skips
+  the detached per-term MSEs and the host-side scalar materialization but keeps
+  every forward/augmentation/backward/optimizer step, counter update and
+  frozen-parameter restore. Metric scalars are detached, stacked, and moved to
+  host once per update; the Python-side coefficient products keep the original
+  double-precision ordering so values match the former per-scalar reads.
 
 This module never constructs optimizers for online-LoRA adaptation, never
 samples/stores replay data, and never touches checkpoints; it owns only the
@@ -541,12 +547,20 @@ class OfficialFADALearner:
         return delta_obs + ref_obs.unsqueeze(1)
 
     def _compute_per_term_mse(
-        self, pred: torch.Tensor, target: torch.Tensor
-    ) -> dict[str, float]:
-        results: dict[str, float] = {}
+        self, pred: torch.Tensor, target: torch.Tensor, *, collect_metrics: bool = True
+    ) -> dict[str, torch.Tensor]:
+        """Detached per-term scalars for reporting only; never part of the loss.
+
+        The caller batches these into a single host transfer. Nothing here
+        consumes RNG or feeds backward, so skipping it cannot change training.
+        """
+
+        if not collect_metrics:
+            return {}
+        results: dict[str, torch.Tensor] = {}
         for term_name, start, end in self._obs_term_slices():
             term_loss = F.mse_loss(pred[..., start:end], target[..., start:end])
-            results[term_name] = float(term_loss.detach().cpu().item())
+            results[term_name] = term_loss.detach()
         return results
 
     # ------------------------------------------------------------------
@@ -561,7 +575,8 @@ class OfficialFADALearner:
         target_next_obs: torch.Tensor,
         history_valid_mask: torch.Tensor | None,
         augment: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+        collect_metrics: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         # Save the clean reference obs for delta conversion before any noise.
         ref_obs = history_obs[:, -1, :]
         if augment:
@@ -584,7 +599,9 @@ class OfficialFADALearner:
             history_valid_mask=history_valid_mask,
         )
         planner_loss = F.mse_loss(pred_future_obs, target_obs_loss_input)
-        per_term = self._compute_per_term_mse(pred_future_obs, target_obs_loss_input)
+        per_term = self._compute_per_term_mse(
+            pred_future_obs, target_obs_loss_input, collect_metrics=collect_metrics
+        )
         weighted_total = float(self._training_config["planner_obs_loss_coef"]) * planner_loss
         return weighted_total, planner_loss, per_term
 
@@ -840,7 +857,20 @@ class OfficialFADALearner:
         self,
         idm_batches_by_source: Mapping[str, OfficialFADASourceBatch],
         planner_batch: OfficialFADASourceBatch,
+        *,
+        collect_metrics: bool = True,
     ) -> dict[str, float]:
+        """Run one official IDM+Planner update.
+
+        ``collect_metrics=False`` only suppresses reporting work (the detached
+        per-term MSEs and the host-side scalar materialization); every forward,
+        augmentation/dropout call, backward pass, gradient clip, optimizer step,
+        counter and frozen-parameter restore still happens, and the call
+        returns an empty dict. Rejections happen before any training work.
+        """
+
+        if not isinstance(collect_metrics, bool):
+            raise ValueError("collect_metrics must be a boolean")
         if not isinstance(idm_batches_by_source, Mapping) or not idm_batches_by_source:
             raise ValueError("idm_batches_by_source must be a non-empty mapping")
         unknown_sources = sorted(set(idm_batches_by_source) - set(_IDM_SOURCE_KEYS))
@@ -891,6 +921,7 @@ class OfficialFADALearner:
                     current_command=planner_tensors["current_command"],
                     target_next_obs=planner_tensors["target_next_observations"],
                     history_valid_mask=planner_tensors["history_valid_mask"],
+                    collect_metrics=collect_metrics,
                 )
                 _, idm_planner_loss, idm_planner_loss_uw = self._compute_idm_loss_from_batch(
                     planner_tensors,
@@ -925,30 +956,58 @@ class OfficialFADALearner:
         if performance is not None:
             performance.increment("learner_updates")
 
+        if not collect_metrics:
+            # Nothing below influences training: the metrics-only device work
+            # (combined-loss add, per-term MSEs) and the host transfer are the
+            # only things skipped, so the update stays numerically identical.
+            return {}
+
+        # Reporting boundary: detached scalars are stacked on the policy
+        # device, transferred to host exactly once, then unpacked into Python
+        # floats. Nothing here keeps a graph or accumulates across steps. The
+        # Python-side weight products keep the original double-precision
+        # ordering, so values are bit-identical to the former per-scalar reads.
         loss_total_combined = total_planner_loss + idm_loss_total
+        term_names = list(planner_per_term)
+        scalar_tensors = [
+            loss_total_combined.detach(),
+            planner_loss_total.detach(),
+            planner_loss.detach(),
+            idm_loss_total.detach(),
+            idm_loss.detach(),
+            idm_loss_unweighted.detach(),
+            idm_planner_loss.detach(),
+            idm_planner_loss_uw.detach(),
+            idm_planner_loss_total_weighted.detach(),
+        ]
+        scalar_tensors.extend(planner_per_term[name] for name in term_names)
+        scalar_values = torch.stack(scalar_tensors).cpu().tolist()
+        (
+            loss_total_value,
+            planner_loss_total_value,
+            planner_loss_value,
+            idm_loss_total_value,
+            idm_loss_value,
+            idm_loss_unweighted_value,
+            idm_planner_loss_value,
+            idm_planner_loss_uw_value,
+            idm_planner_loss_weighted_value,
+        ) = scalar_values[:9]
+        planner_coef = float(self._training_config["planner_obs_loss_coef"])
+        idm_coef = float(self._training_config["idm_action_loss_coef"])
         metrics: dict[str, float] = {
-            "loss_total": float(loss_total_combined.detach().cpu().item()),
-            "planner_loss_total": float(planner_loss_total.detach().cpu().item()),
-            "planner_future_obs_loss": float(planner_loss.detach().cpu().item()),
-            "planner_future_obs_loss_weighted": float(
-                float(self._training_config["planner_obs_loss_coef"])
-                * planner_loss.detach().cpu().item()
-            ),
-            "idm_loss_total": float(idm_loss_total.detach().cpu().item()),
-            "idm_action_loss": float(idm_loss.detach().cpu().item()),
-            "idm_action_loss_unweighted": float(idm_loss_unweighted.detach().cpu().item()),
-            "idm_action_loss_weighted": float(
-                float(self._training_config["idm_action_loss_coef"])
-                * idm_loss.detach().cpu().item()
-            ),
-            "idm_planner_pass_action_loss": float(idm_planner_loss.detach().cpu().item()),
-            "idm_planner_pass_action_loss_unweighted": float(
-                idm_planner_loss_uw.detach().cpu().item()
-            ),
-            "idm_planner_pass_action_loss_weighted": float(
-                idm_planner_loss_total_weighted.detach().cpu().item()
-            ),
+            "loss_total": loss_total_value,
+            "planner_loss_total": planner_loss_total_value,
+            "planner_future_obs_loss": planner_loss_value,
+            "planner_future_obs_loss_weighted": planner_coef * planner_loss_value,
+            "idm_loss_total": idm_loss_total_value,
+            "idm_action_loss": idm_loss_value,
+            "idm_action_loss_unweighted": idm_loss_unweighted_value,
+            "idm_action_loss_weighted": idm_coef * idm_loss_value,
+            "idm_planner_pass_action_loss": idm_planner_loss_value,
+            "idm_planner_pass_action_loss_unweighted": idm_planner_loss_uw_value,
+            "idm_planner_pass_action_loss_weighted": idm_planner_loss_weighted_value,
         }
-        for term_name, term_loss in planner_per_term.items():
-            metrics[f"planner_term/{term_name}"] = float(term_loss)
+        for term_name, term_value in zip(term_names, scalar_values[9:], strict=False):
+            metrics[f"planner_term/{term_name}"] = term_value
         return metrics

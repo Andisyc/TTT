@@ -9,18 +9,41 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, cast
 
+import torch
 from omegaconf import DictConfig, OmegaConf
 
 from unilab.algos.torch.distill.fada.async_config import fada_training_schedule
 from unilab.algos.torch.distill.fada.async_runtime import allocate_fada_command_scenarios
+
+# The prefetch pre-check below reads the pipeline's own quota sources and transient
+# reserve instead of keeping a second copy of either.
+from unilab.algos.torch.distill.fada.batch_pipeline import (
+    _PLANNER_SOURCES as _BATCH_PIPELINE_PLANNER_SOURCES,
+    _TRANSIENT_PAYLOADS as _BATCH_PIPELINE_TRANSIENT_PAYLOADS,
+)
+from unilab.algos.torch.distill.fada.collection_contract import (
+    official_raw_transition_layout,
+    official_window_batch_layout,
+)
+from unilab.algos.torch.distill.fada.execution_contract import (
+    FADAExecutionLimits,
+    Layout,
+    layout_nbytes,
+    raw_chunk_rows,
+    validate_prefetch_budget,
+)
 from unilab.algos.torch.distill.fada.model import FADAArchitectureConfig
 from unilab.algos.torch.distill.fada.observation import (
     FADA_G1_STATE_OBSERVATION_CONTRACT,
     assert_fada_active_route_contract,
     assert_fada_projection_matches_contract,
 )
+from unilab.algos.torch.distill.fada.official_learning import (
+    canonical_official_training_config,
+)
 from unilab.algos.torch.distill.fada.replay_sampling import (
     FADAReplaySamplingSpec,
+    official_replay_source_counts,
     validate_sampling_batch_size,
 )
 from unilab.algos.torch.distill.fada.source_plan import (
@@ -388,3 +411,183 @@ def resolve_official_fada_setup(
         experiment_override_args=tuple(overrides),
     )
     return spec, model_config, device, output_dir, timeout
+
+
+# Execution budgets live beside ``training.fada.config``, never inside it: the native
+# FADAConfig, offline caches, checkpoints and source identity do not carry them.
+_FADA_EXECUTION_FIELDS: tuple[str, ...] = (
+    "transport_budget_bytes",
+    "prefetch_budget_bytes",
+    "pending_raw_budget_bytes",
+    "slots",
+    "prefetch_batches",
+)
+
+
+def _execution_positive_int(execution: Mapping[str, Any], name: str) -> int:
+    value = execution[name]
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            f"training.fada.execution.{name} must be a positive integer, got {value!r}"
+        )
+    return int(value)
+
+
+def _native_positive_int(config: Mapping[str, Any], name: str) -> int:
+    if name not in config:
+        raise ValueError(
+            f"official FADA config must declare {name} to size the execution budget; "
+            "the resolver never substitutes an upstream default"
+        )
+    value = config[name]
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            f"training.fada.config.{name} must be a positive integer to size the "
+            f"execution budget, got {value!r}"
+        )
+    return int(value)
+
+
+def _official_prefetch_step_layouts(
+    spec: OfficialFADACollectionSpec,
+    training_config: Mapping[str, Any],
+    *,
+    mode: str,
+) -> list[Layout]:
+    """Per-step staging layouts of one pipeline stage, from the sampler's own quota owner."""
+
+    planner_counts = official_replay_source_counts(training_config, mode=mode, planner=True)
+    planner_rows = sum(planner_counts[source] for source in _BATCH_PIPELINE_PLANNER_SOURCES)
+    if planner_rows <= 0:
+        raise ValueError(
+            f"official FADA planner quota is empty in mode {mode!r}; nothing to prefetch"
+        )
+    layouts: list[Layout] = [official_window_batch_layout(spec, planner_rows)]
+    idm_counts = official_replay_source_counts(training_config, mode=mode, planner=False)
+    layouts.extend(
+        official_window_batch_layout(spec, size) for size in idm_counts.values() if size
+    )
+    return layouts
+
+
+def _assert_official_prefetch_fits(
+    limits: FADAExecutionLimits,
+    layouts: list[Layout],
+    *,
+    mode: str,
+    copies: int,
+) -> None:
+    """Same staging + transient arithmetic the pipeline itself enforces before allocation."""
+
+    retained = validate_prefetch_budget(list(layouts) * copies, limits)
+    transient = (
+        sum(layout_nbytes(layout) for layout in layouts) * _BATCH_PIPELINE_TRANSIENT_PAYLOADS
+    )
+    if retained + transient > limits.prefetch_budget_bytes:
+        raise ValueError(
+            "training.fada.execution.prefetch_budget_bytes cannot hold the prefetched "
+            f"{mode!r} stage plus its transient sampling peak: "
+            f"budget={limits.prefetch_budget_bytes} retained={retained} "
+            f"transient={transient} copies={copies} batches={limits.prefetch_batches}"
+        )
+
+
+def resolve_official_fada_execution(
+    cfg: DictConfig,
+    *,
+    spec: OfficialFADACollectionSpec | None = None,
+) -> tuple[FADAExecutionLimits, int]:
+    """Resolve the one official execution budget before any model or worker is built.
+
+    ``spec`` lets the composition root hand over the already-resolved official metadata;
+    without it the resolver runs the same pure metadata setup itself instead of inventing
+    placeholder paths. Either way the returned limits describe the declared buffers only, not
+    the whole process or device memory, and every capacity combination is rejected here rather
+    than after a model, shared segment or collector exists.
+    """
+
+    if spec is not None and not isinstance(spec, OfficialFADACollectionSpec):
+        raise TypeError(
+            "resolve_official_fada_execution requires an OfficialFADACollectionSpec, "
+            f"got {type(spec).__name__}"
+        )
+    if spec is None:
+        spec = resolve_official_fada_setup(cfg)[0]
+    raw = OmegaConf.select(cfg, "training.fada.execution", default=None)
+    if raw is None:
+        raise ValueError(
+            "official FADA training requires training.fada.execution with "
+            + ", ".join(_FADA_EXECUTION_FIELDS)
+        )
+    execution = OmegaConf.to_container(raw, resolve=True) if OmegaConf.is_config(raw) else raw
+    if not isinstance(execution, Mapping):
+        raise TypeError("training.fada.execution must be a mapping of byte/slot budgets")
+    missing = [name for name in _FADA_EXECUTION_FIELDS if name not in execution]
+    unknown = sorted(set(execution) - set(_FADA_EXECUTION_FIELDS))
+    if missing or unknown:
+        raise ValueError(
+            "training.fada.execution accepts exactly "
+            f"{list(_FADA_EXECUTION_FIELDS)}: missing={missing} unknown={unknown}"
+        )
+    values = {name: _execution_positive_int(execution, name) for name in _FADA_EXECUTION_FIELDS}
+    limits = FADAExecutionLimits(
+        transport_budget_bytes=values["transport_budget_bytes"],
+        prefetch_budget_bytes=values["prefetch_budget_bytes"],
+        slots=values["slots"],
+        prefetch_batches=values["prefetch_batches"],
+    )
+    pending_raw_budget_bytes = values["pending_raw_budget_bytes"]
+
+    # 1. One raw transition row per slot has to fit the transport budget; the 6.1 owner
+    #    decides the chunk capacity, this call only rejects an impossible layout.
+    raw_chunk_rows(official_raw_transition_layout(spec, 1), limits)
+
+    # 2. The largest configured collect transaction must fit the pending raw budget. Every
+    #    offline/suboptimal request asks for the warmup horizon and every online request uses
+    #    rollout_steps_per_iter, so the retained rows are that step count times num_envs.
+    native = dict(spec.config)
+    num_envs = _native_positive_int(native, "num_envs")
+    horizon = _native_positive_int(native, "warmup_max_steps_per_episode")
+    online_steps = _native_positive_int(native, "rollout_steps_per_iter")
+    pending_rows = max(horizon, online_steps) * num_envs
+    pending_required = layout_nbytes(official_raw_transition_layout(spec, pending_rows))
+    if pending_required > pending_raw_budget_bytes:
+        raise ValueError(
+            "training.fada.execution.pending_raw_budget_bytes cannot retain one configured "
+            f"collection transaction: needed={pending_required} "
+            f"budget={pending_raw_budget_bytes} rows={pending_rows} "
+            f"num_envs={num_envs} warmup_steps={horizon} online_steps={online_steps}"
+        )
+
+    # 3. Prefetch staging holds every active/queued host copy (plus the device copy on CUDA)
+    #    and reserves the pipeline's own transient sampling peak.
+    training_config = canonical_official_training_config(
+        {name: native[name] for name in canonical_official_training_config() if name in native}
+    )
+    device = str(
+        OmegaConf.select(cfg, "training.device", default=native.get("device", "cuda:0")) or ""
+    )
+    if not device:
+        raise ValueError("official FADA execution budgets require a declared training.device")
+    try:
+        device_type = torch.device(device).type
+    except (RuntimeError, TypeError) as exc:
+        raise ValueError(
+            f"official FADA execution budgets cannot interpret training.device={device!r}"
+        ) from exc
+    if device_type not in {"cpu", "cuda"}:
+        raise ValueError(
+            "official FADA execution budgets support cpu/cuda stages, "
+            f"got training.device={device!r}"
+        )
+    # A CPU stage keeps one host copy per slot; a CUDA stage keeps the pinned host copy and
+    # the device copy, exactly as the 6.3 pipeline allocates them.
+    copies = 2 if device_type == "cuda" else 1
+    for mode in ("offline", "mixed"):
+        _assert_official_prefetch_fits(
+            limits,
+            _official_prefetch_step_layouts(spec, training_config, mode=mode),
+            mode=mode,
+            copies=copies,
+        )
+    return limits, pending_raw_budget_bytes

@@ -558,8 +558,9 @@ class SimBackend(abc.ABC):
     def get_base_ang_vel(self) -> np.ndarray:
         """Return base angular velocity in the world frame.
 
-        This is dimensions 3-5 of generalized velocity ``qvel``, expressed in
-        world coordinates. It differs from gyro readings: gyro sensors report
+        Backends must convert their native velocity convention to world
+        coordinates (MuJoCo free-joint rotational qvel is body-local).
+        It differs from gyro readings: gyro sensors report
         angular velocity components in the body/sensor local frame, while this
         contract returns world-frame values. Use the matching sensor contract
         when body-frame angular velocity is required.

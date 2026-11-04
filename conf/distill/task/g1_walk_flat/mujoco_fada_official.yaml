@@ -1,0 +1,9 @@
+# @package _global_
+# Fixed official G1 source: 200 Hz simulation, four substeps per policy action.
+# PD, phase frequency and ctrl_dt are bound from official_playback.profile_path.
+defaults:
+  - /task/g1_walk_flat/mujoco
+  - _self_
+
+env:
+  sim_dt: 0.005

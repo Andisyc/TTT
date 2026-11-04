@@ -426,6 +426,10 @@ def create_fada_playback_session(
         raise ValueError("official Locomotion playback requires task=g1_walk_flat/mujoco")
     build_env_cfg_override = resolved_deps.get("build_env_cfg_override")
     env_cfg_override = build_env_cfg_override(cfg) if build_env_cfg_override is not None else {}
+    if official_profile is not None:
+        from unilab.algos.torch.distill.fada.official_deployment import bind_official_playback_control
+
+        env_cfg_override = bind_official_playback_control(env_cfg_override, official_profile)
     env_cfg_override = _apply_keyboard_playback_reset_contract(
         env_cfg_override,
         task_name,

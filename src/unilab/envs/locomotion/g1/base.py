@@ -72,6 +72,16 @@ class G1BaseEnv(LocomotionBaseEnv):
         """Return batched world-frame base linear velocity."""
         return np.asarray(self._backend.get_base_lin_vel())
 
+    def get_base_ang_vel(self) -> np.ndarray:
+        """Return batched world-frame base angular velocity."""
+        return np.asarray(self._backend.get_base_ang_vel())
+
+    def get_actuated_joint_names(self) -> tuple[str, ...]:
+        return tuple(self._backend.get_actuated_joint_names())
+
+    def get_actuator_gains(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._backend.get_actuator_gains()
+
     def get_foot_pos(self) -> np.ndarray:
         """Return left/right foot world positions with shape ``(N, 2, 3)``."""
         left = np.asarray(self._backend.get_sensor_data("left_foot_pos"))

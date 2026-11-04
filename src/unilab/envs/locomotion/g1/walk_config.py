@@ -607,6 +607,7 @@ def _walk_curriculum() -> CurriculumConfig:
 class G1WalkControlConfig:
     action_scale: float = 1.0
     simulate_action_latency: bool = False
+    position_actuator_gains: dict[str, Any] | None = None
 
 
 @dataclass

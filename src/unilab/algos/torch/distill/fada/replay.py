@@ -21,6 +21,7 @@ from unilab.algos.torch.distill.fada.collection_contract import (
     validate_official_fada_preprocessing,
 )
 from unilab.algos.torch.distill.fada.official_learning import canonical_official_training_config
+from unilab.algos.torch.distill.fada.official_replay_sampling import OfficialFADAChunkSampler
 from unilab.algos.torch.distill.fada.replay_sampling import (
     FADAReplayCoverage,
     FADAReplaySamplingPlan,
@@ -487,8 +488,8 @@ class OfficialFADAReplayBuffer:
     episode-unit eviction. Physical collection never subsamples, splits, or
     samples windows; this owner applies trajectory subsampling and the
     train/val split exactly once with the original seeds and functions, and
-    every update re-runs the upstream ``sample_chunk`` and converts the
-    original nine-field result into ``OfficialFADASourceBatch``.
+    every update uses the upstream valid anchors and random draw with batched
+    window gathering, then converts its nine fields into ``OfficialFADASourceBatch``.
     """
 
     def __init__(
@@ -547,6 +548,7 @@ class OfficialFADAReplayBuffer:
             "online": replay_cls(eviction_policy=eviction, **buffer_kwargs),
         }
         self._val_buffers: dict[str, Any] = dict.fromkeys(self._buffers)
+        self._chunk_samplers: dict[str, OfficialFADAChunkSampler] = {}
         self._offline_frozen = False
         self._expert_identity: tuple[str, str] | None = None
         if source_identity is not None:
@@ -988,7 +990,7 @@ class OfficialFADAReplayBuffer:
         return stats
 
     # ------------------------------------------------------------------
-    # Sampling (fresh upstream sample_chunk per update; Planner first)
+    # Sampling (fresh official anchor draw per update; Planner first)
     # ------------------------------------------------------------------
     def _chronological_batch(self, source: str) -> OfficialFADARawTransitionBatch:
         buffer = self._buffers[source]
@@ -1007,7 +1009,11 @@ class OfficialFADAReplayBuffer:
                 f"official {source} replay has no transitions for requested batch {count}"
             )
         with measure(self._performance, "learner_batch_staging", group="replay_sample"):
-            result = buffer.sample_chunk(int(count))
+            sampler = self._chunk_samplers.get(source)
+            if sampler is None or sampler.buffer is not buffer:
+                sampler = OfficialFADAChunkSampler(buffer)
+                self._chunk_samplers[source] = sampler
+            result = sampler.sample_chunk(int(count))
             missing = sorted(set(OfficialFADASourceBatch.__dataclass_fields__) - set(result))
             extra = sorted(set(result) - set(OfficialFADASourceBatch.__dataclass_fields__))
             if missing or extra:

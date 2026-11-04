@@ -205,6 +205,7 @@ class G1WalkEnv(
             mujoco_num_threads=cfg.mujoco_num_threads,
             motrix_max_iterations=cfg.motrix_max_iterations,
             post_step_forward_sensor=cfg.post_step_forward_sensor,
+            position_actuator_gains=cfg.control_config.position_actuator_gains,
         )
         super().__init__(cfg, backend, num_envs)
         self._enable_reward_log = True

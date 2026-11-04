@@ -129,6 +129,36 @@ def test_mujoco_backend_fixed_base_dof_views_do_not_skip_first_joint():
     _unit_quat(bkd.get_base_quat(), "MuJoCo fixed-base smoke")
 
 
+def test_mujoco_base_angular_velocity_matches_world_object_velocity():
+    """A turning base must not expose body-local qvel as world angular velocity."""
+    mujoco = _mujoco_module()
+    from unilab.base.backend.mujoco.backend import MuJoCoBackend
+
+    bkd = MuJoCoBackend(SceneCfg(model_file=_G1["model_file"]), 3, SIM_DT, base_name="pelvis")
+    try:
+        bkd.materialize()
+        qpos = np.tile(bkd.get_keyframe_qpos("stand"), (3, 1))
+        qpos[:, 3:7] = [[1, 0, 0, 0], [2**-.5, 0, 0, 2**-.5], [.5, .5, .5, .5]]
+        qvel = np.tile(bkd.get_init_qvel(), (3, 1))
+        qvel[:, 3:6] = [.7, .2, .4]
+        bkd.set_state(np.arange(3, dtype=np.int32), qpos, qvel)
+        before = bkd.get_physics_state().copy()
+        body_id = int(bkd.get_body_ids(["pelvis"])[0])
+        expected = []
+        data = mujoco.MjData(bkd.model)
+        for q, v in zip(qpos, qvel, strict=True):
+            data.qpos[:] = q
+            data.qvel[:] = v
+            mujoco.mj_forward(bkd.model, data)
+            velocity = np.zeros(6)
+            mujoco.mj_objectVelocity(bkd.model, data, mujoco.mjtObj.mjOBJ_BODY, body_id, velocity, 0)
+            expected.append(velocity[:3].copy())
+        np.testing.assert_allclose(bkd.get_base_ang_vel(), expected, atol=1e-6)
+        np.testing.assert_array_equal(bkd.get_physics_state(), before)
+    finally:
+        bkd.close()
+
+
 @pytest.mark.parametrize("robot", BASIC_ROBOTS)
 def test_motrix_backend_smoke_contract(robot):
     pytest.importorskip("motrixsim")

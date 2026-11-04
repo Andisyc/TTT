@@ -9,8 +9,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Callable, Literal
 
 import torch
 
@@ -95,6 +96,58 @@ class PersistentDistillationRuntime:
         if mismatches:
             raise ValueError(f"checkpoint state shape mismatch: {mismatches}")
 
+    def _stage_state_dict(
+        self,
+        state_dict: Mapping[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Detach caller-owned tensors onto host memory without casting or copying values.
+
+        The shared buffer is float32 and is published through direct NumPy assignment, so a
+        non-float32 or non-finite entry would otherwise be silently coerced. Reject both here,
+        before any shared-memory write or pending-state mutation.
+        """
+
+        if not isinstance(state_dict, Mapping) or not state_dict:
+            raise ValueError("provided state_dict must be a non-empty mapping")
+        staged: dict[str, torch.Tensor] = {}
+        wrong_dtype: dict[str, str] = {}
+        empty: list[str] = []
+        non_finite: list[str] = []
+        for name, value in state_dict.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError(
+                    f"provided state_dict key must be a non-empty string, got {name!r}"
+                )
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(
+                    f"provided state_dict entry {name!r} must be a torch.Tensor, "
+                    f"got {type(value).__name__}"
+                )
+            if value.dtype != torch.float32:
+                wrong_dtype[name] = str(value.dtype)
+                continue
+            host = value.detach().cpu()
+            if host.numel() == 0:
+                empty.append(name)
+                continue
+            if not bool(torch.isfinite(host).all()):
+                non_finite.append(name)
+                continue
+            staged[name] = host
+        problems: list[str] = []
+        if wrong_dtype:
+            problems.append(f"non-float32={wrong_dtype}")
+        if empty:
+            problems.append(f"empty={sorted(empty)}")
+        if non_finite:
+            problems.append(f"non-finite={sorted(non_finite)}")
+        if problems:
+            raise ValueError(
+                "provided state_dict violates SharedWeightSync publication constraints: "
+                + ", ".join(problems)
+            )
+        return staged
+
     def _ensure_runtime(
         self,
         checkpoint_path: Path | None,
@@ -150,18 +203,47 @@ class PersistentDistillationRuntime:
         self._pending_state_dict = None
         return self._weight_sync.version
 
-    def activate_checkpoint(self, checkpoint_path: Path) -> int:
+    def activate_checkpoint(
+        self,
+        checkpoint_path: Path,
+        *,
+        state_dict: Mapping[str, torch.Tensor] | None = None,
+    ) -> int:
+        """Publish one checkpoint barrier; weights come from memory when supplied.
+
+        ``checkpoint_path`` is the identity and durable target of this barrier: with an
+        explicit ``state_dict`` it never has to exist on disk, and it may still name the
+        previously committed checkpoint. Publication completes synchronously before the
+        returned version is visible to any request; no staged tensors stay reachable
+        afterwards.
+        """
+
         if self._closed:
             raise RuntimeError("cannot activate a closed persistent distillation runtime")
         resolved_path = Path(checkpoint_path).resolve()
-        state_dict = self._load_state_dict(resolved_path)
-        self._ensure_runtime(resolved_path, state_dict)
-        assert self._param_shapes is not None
-        self._validate_state_dict(state_dict)
+        if state_dict is None:
+            loaded = self._load_state_dict(resolved_path)
+            self._ensure_runtime(resolved_path, loaded)
+            assert self._param_shapes is not None
+            self._validate_state_dict(loaded)
+            self._pending_path = str(resolved_path)
+            self._pending_state_dict = loaded
+            assert self._runner is not None
+            return self._runner.activate_checkpoint(resolved_path)
+        staged = self._stage_state_dict(state_dict)
+        if self._param_shapes is not None:
+            # Reject key/shape drift before any pending-state mutation or shared write.
+            self._validate_state_dict(staged)
+        self._ensure_runtime(resolved_path, staged)
         self._pending_path = str(resolved_path)
-        self._pending_state_dict = state_dict
+        self._pending_state_dict = staged
         assert self._runner is not None
-        return self._runner.activate_checkpoint(resolved_path)
+        try:
+            return self._runner.activate_checkpoint(resolved_path)
+        finally:
+            # The staged dict must not outlive its single synchronous publication.
+            self._pending_path = None
+            self._pending_state_dict = None
 
     def prepare(self, request: DaggerPrepareRequest) -> DaggerPrepareResult:
         if self._closed:

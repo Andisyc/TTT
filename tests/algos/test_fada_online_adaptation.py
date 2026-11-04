@@ -19,6 +19,7 @@ from unilab.algos.torch.distill.fada.online_data import (
 )
 from unilab.algos.torch.distill.fada.online_updater import OnlineSnapshotUpdater, build_expert_samples
 from unilab.algos.torch.distill.fada.playback import FADAPlaybackController
+from unilab.algos.torch.distill.fada.runtime_policy import FADARuntimeSpec, get_fada_runtime_spec
 
 
 @pytest.fixture
@@ -61,13 +62,114 @@ def test_expert_difference_preserves_snapshot_and_uses_nominal_minus_realized():
     realized[:, 1, 6:35] += 0.7
     changed = FADATrajectoryPair(snapshot, realized, 0, 4)
     matched = FADATrajectoryPair(snapshot, snapshot.nominal_future, 0, 5)
-    samples = build_expert_samples(expert, (changed, matched), gamma=0.05)
+    samples = build_expert_samples(
+        expert, (changed, matched), gamma=0.05,
+        runtime_spec=FADARuntimeSpec("legacy", 66, 29, 3, "g1_fada_state_v2", 3, 2),
+    )
     expected = torch.full((1, 29), 0.2) + 0.005 * expert.gains
     torch.testing.assert_close(samples[0].target_action, expected)
     torch.testing.assert_close(samples[1].target_action, snapshot.action_snapshot, atol=0, rtol=0)
     assert samples[0].trajectory is changed and samples[1].trajectory is matched
     assert all(not sample.target_action.requires_grad for sample in samples)
     assert expert.gains.grad is None
+
+
+def _expert_inputs(family):
+    official = family == "official"
+    dim, command_dim = (64, 7) if official else (66, 3)
+    contract = "official_compact_64_v1" if official else "g1_fada_state_v2"
+    snapshot = FADAInferenceSnapshot(
+        torch.zeros(1, 3, dim), torch.zeros(1, 3, 29),
+        torch.zeros(1, command_dim), torch.ones(1, 2, dim),
+        torch.full((1, 29), 0.6), observation_contract=contract,
+        history_valid_mask=torch.ones(1, 3, dtype=torch.bool) if official else None,
+    )
+    pair = FADATrajectoryPair(snapshot, torch.zeros(1, 2, dim), 0, 0)
+    return FADARuntimeSpec(family, dim, 29, command_dim, contract, 3, 2), pair
+
+
+@pytest.mark.parametrize("family", ["legacy", "official"])
+@pytest.mark.parametrize("mode, expected", [
+    ("trajectory_base", 0.61), ("action_base", 0.62), ("trajectory_lora", 0.64),
+])
+@pytest.mark.parametrize("gamma", [0.0, 0.1])
+def test_expert_modes_numeric_targets_and_isolation(family, mode, expected, gamma):
+    class AffineReference(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            values = [0.4, 0.3] if mode == "trajectory_lora" else [0.1, 0.4]
+            self.coefficients = torch.nn.Parameter(
+                torch.tensor(values), requires_grad=mode == "trajectory_lora",
+            )
+
+        def forward(self, observations, actions, command_or_future, future=None, *, history_valid_mask=None):
+            trajectory = command_or_future if future is None else future
+            return (trajectory[:, :, :29] * self.coefficients[0] + self.coefficients[1])
+
+    spec, pair = _expert_inputs(family)
+    reference = AffineReference().eval()
+    reference.coefficients.grad = torch.full_like(reference.coefficients, 0.25)
+    weights_before = reference.coefficients.detach().clone()
+    gradient_before = reference.coefficients.grad.clone()
+    snapshot_before = {
+        name: value.clone() for name, value in vars(pair.snapshot).items()
+        if isinstance(value, torch.Tensor)
+    }
+    samples = build_expert_samples(reference, (pair,), gamma=gamma, runtime_spec=spec, mode=mode)
+    target = samples[0].target_action
+    torch.testing.assert_close(target, torch.full((1, 29), expected if gamma else 0.6))
+    assert not target.requires_grad and target.grad_fn is None
+    torch.testing.assert_close(reference.coefficients, weights_before, rtol=0, atol=0)
+    torch.testing.assert_close(reference.coefficients.grad, gradient_before, rtol=0, atol=0)
+    assert reference.coefficients.requires_grad == (mode == "trajectory_lora")
+    assert all(not module.training for module in reference.modules())
+    for name, before in snapshot_before.items():
+        torch.testing.assert_close(getattr(pair.snapshot, name), before, rtol=0, atol=0)
+    torch.testing.assert_close(pair.realized_future, torch.zeros_like(pair.realized_future))
+    matched = replace(pair, realized_future=pair.snapshot.nominal_future)
+    matched_target = build_expert_samples(
+        reference, (matched,), gamma=gamma, runtime_spec=spec, mode=mode,
+    )[0].target_action
+    matched_expected = 0.6 + gamma * 0.1 if mode == "action_base" else 0.6
+    torch.testing.assert_close(matched_target, torch.full((1, 29), matched_expected))
+    with torch.no_grad():
+        reference.coefficients.add_(10)
+    torch.testing.assert_close(target, torch.full((1, 29), expected if gamma else 0.6))
+
+
+@pytest.mark.parametrize("family", ["legacy", "official"])
+def test_expert_modes_real_tracker_runtime_and_guards(config, family):
+    if family == "legacy":
+        policy = FADAPlannerIDMPolicy(config).eval()
+    else:
+        from unilab.algos.torch.distill.fada.official_model import build_official_fada_student
+
+        policy = build_official_fada_student({
+            "history_len": 3, "pred_horizon": 2,
+            "planner_d_model": 8, "planner_nhead": 2, "planner_num_layers": 1,
+            "planner_dim_feedforward": 16, "planner_dropout": 0.0,
+            "idm_d_model": 8, "idm_nhead": 2, "idm_encoder_num_layers": 1,
+            "idm_decoder_num_layers": 1, "idm_dim_feedforward": 16, "idm_dropout": 0.0,
+        }).eval()
+    _, pair = _expert_inputs(family)
+    spec = get_fada_runtime_spec(policy)
+    for mode in ("trajectory_base", "action_base"):
+        with pytest.raises(ValueError, match="must be frozen"):
+            build_expert_samples(policy.idm, (pair,), gamma=0.1, runtime_spec=spec, mode=mode)
+    moving_target = build_expert_samples(
+        policy.idm, (pair,), gamma=0.1, runtime_spec=spec, mode="trajectory_lora",
+    )[0].target_action
+    policy.idm.requires_grad_(False)
+    fixed_target = build_expert_samples(policy.idm, (pair,), gamma=0.1, runtime_spec=spec)[0].target_action
+    torch.testing.assert_close(moving_target, fixed_target, rtol=0, atol=0)
+    assert all(parameter.grad is None for parameter in policy.parameters())
+    with pytest.raises(ValueError, match="unsupported online target mode"):
+        build_expert_samples(policy.idm, (pair,), gamma=0.1, runtime_spec=spec, mode="invalid")
+    policy.idm.train()
+    for mode in ("trajectory_base", "action_base", "trajectory_lora"):
+        with pytest.raises(ValueError, match="eval mode"):
+            build_expert_samples(policy.idm, (pair,), gamma=0.1, runtime_spec=spec, mode=mode)
+    assert all(module.training for module in policy.idm.modules())
 
 
 def test_trajectory_pair_owns_future_without_recopying_snapshot():

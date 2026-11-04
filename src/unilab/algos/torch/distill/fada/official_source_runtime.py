@@ -22,7 +22,12 @@ the existing UniLab persistent-collector infrastructure. This module owns:
   student weights through ``SharedWeightSync``, delegates raw-transition
   production to the sibling ``collect_official_fada_raw_transitions``
   transaction, and atomically persists the artifact through
-  ``FADAShardedSourceWriter``.
+  ``FADAShardedSourceWriter``. When a shared-memory endpoint is injected, a
+  request that carries a ``transport_id`` instead streams the batch over the
+  attached channel (``shared_collection.send_shared_collection``) and reports
+  ``payload_kind=shared_memory`` plus the transport id, so the raw trajectory
+  never touches the filesystem; requests without a ``transport_id`` keep the
+  original artifact path.
 
 The collection source, optional weak checkpoint, and optional total raw
 transition budget are taken from each ``OfficialFADACollectRequest``; the spec
@@ -51,6 +56,7 @@ import dataclasses
 import hashlib
 import importlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -72,6 +78,12 @@ from unilab.algos.torch.distill.fada.official_model import (
     OFFICIAL_MODEL_DIMS,
     canonical_official_model_config,
 )
+from unilab.algos.torch.distill.fada.shared_collection import (
+    SHARED_PAYLOAD_KIND,
+    abort_shared_transport,
+    send_shared_collection,
+    validate_shared_request,
+)
 from unilab.algos.torch.distill.fada.source_artifact import FADAShardedSourceWriter
 from unilab.algos.torch.distill.runtime.async_runtime import (
     DaggerCollectRequest,
@@ -80,6 +92,10 @@ from unilab.algos.torch.distill.runtime.async_runtime import (
     DaggerPrepareResult,
 )
 from unilab.ipc import SharedWeightSync
+from unilab.ipc.shared_tensor_protocol import (
+    SharedTensorChannelProtocol,
+    SharedTensorEndpointProtocol,
+)
 
 __all__ = [
     "OfficialFADACollectorWorker",
@@ -602,6 +618,11 @@ class OfficialFADACollectorWorker:
     strictly synced weight version (version ≥ 1), and drives the dynamic
     ``OfficialFADACollectRequest`` source/weak-checkpoint/budget through one
     upstream rollout per request.
+
+    When a ``shared_endpoint`` is injected, construction attaches one local
+    channel to it and ``collect`` serves requests that carry a ``transport_id``
+    by streaming the raw batch over that channel instead of writing an
+    artifact; requests without one keep the original file artifact path.
     """
 
     def __init__(
@@ -612,12 +633,26 @@ class OfficialFADACollectorWorker:
         weight_sync_lock: Any,
         weight_param_shapes: Mapping[str, torch.Size],
         performance_enabled: bool = False,
+        shared_endpoint: SharedTensorEndpointProtocol | None = None,
+        shared_timeout_seconds: float = 300.0,
     ) -> None:
         if not isinstance(performance_enabled, bool):
             raise ValueError("performance_enabled must be a boolean")
+        if (
+            isinstance(shared_timeout_seconds, bool)
+            or not isinstance(shared_timeout_seconds, (int, float))
+            or not math.isfinite(shared_timeout_seconds)
+            or shared_timeout_seconds <= 0
+        ):
+            raise ValueError(
+                "shared_timeout_seconds must be a finite positive number of seconds, "
+                f"got {shared_timeout_seconds!r}"
+            )
         self._closed = False
         self._spec = spec
         self._performance_enabled = performance_enabled
+        self._shared_timeout_seconds = float(shared_timeout_seconds)
+        self._shared_channel: SharedTensorChannelProtocol | None = None
         self._weight_param_shapes: dict[str, torch.Size] = dict(weight_param_shapes)
         self._resources: OfficialFADASourceResources | None = None
         self._weight_sync: SharedWeightSync | None = None
@@ -629,6 +664,9 @@ class OfficialFADACollectorWorker:
                 shm_name=weight_sync_name,
                 lock=weight_sync_lock,
             )
+            if shared_endpoint is not None:
+                # The creator owns unlink; this worker only attaches and closes locally.
+                self._shared_channel = shared_endpoint.attach()
         except BaseException:
             self._close_resources(raise_errors=False)
             raise
@@ -750,6 +788,19 @@ class OfficialFADACollectorWorker:
                 "official FADA collect requires a published, activated checkpoint "
                 f"(weight version >= 1), got {int(request.expected_weight_version)}"
             )
+        # A shared request must be rejected here, before any native sampling: endpoint,
+        # transport id and (empty) output path are checked against the attached channel and
+        # the collection spec. There is no disk fallback for an invalid shared request.
+        shared_channel: SharedTensorChannelProtocol | None = None
+        if request.transport_id is not None:
+            shared_channel = self._shared_channel
+            if shared_channel is None:
+                raise RuntimeError(
+                    "shared FADA collection request "
+                    f"{request.request_id!r} arrived without an attached shared channel; "
+                    "refusing to fall back to an artifact path"
+                )
+            validate_shared_request(shared_channel, request, spec=self._spec)
 
         from unilab.algos.torch.distill.fada.official_source_collection import (
             collect_official_fada_raw_transitions,
@@ -765,61 +816,85 @@ class OfficialFADACollectorWorker:
             FADAPerformanceRecorder(device="cpu") if self._performance_enabled else None
         )
         started = time.perf_counter()
-        observed_version = self._sync_student_weights(request)
-        synced = time.perf_counter()
+        try:
+            observed_version = self._sync_student_weights(request)
+            synced = time.perf_counter()
 
-        batch, collected_steps = collect_official_fada_raw_transitions(
-            resources,
-            source=request.source,
-            weak_checkpoint=request.weak_checkpoint,
-            collect_steps=request.collect_steps,
-            recorder=recorder,
-        )
-        collected = time.perf_counter()
+            batch, collected_steps = collect_official_fada_raw_transitions(
+                resources,
+                source=request.source,
+                weak_checkpoint=request.weak_checkpoint,
+                collect_steps=request.collect_steps,
+                recorder=recorder,
+            )
+            collected = time.perf_counter()
+            if int(batch.num_samples) <= 0:
+                raise RuntimeError(
+                    "official FADA collection produced an empty batch; refusing to "
+                    "report a successful artifact"
+                )
+        except BaseException:
+            if shared_channel is not None:
+                # A shared peer is already draining: a native/weight-sync failure would
+                # otherwise leave it blocked until its own deadline.
+                abort_shared_transport(shared_channel)
+            raise
 
         producer_pid = os.getpid()
         num_samples = int(batch.num_samples)
-        if num_samples <= 0:
-            raise RuntimeError(
-                "official FADA collection produced an empty batch; refusing to report "
-                "a successful artifact"
-            )
-        with FADAShardedSourceWriter(
-            request.output_path,
-            official_spec=spec,
-        ) as writer:
-            writer.append(batch)
-            writer.commit(
-                metadata={
-                    "request_id": request.request_id,
-                    "scenario": request.scenario,
-                    "iteration": int(request.iteration),
-                    "checkpoint_path": request.checkpoint_path,
-                    "expected_weight_version": int(request.expected_weight_version),
-                    "observed_weight_version": observed_version,
-                    "producer_pid": producer_pid,
-                    "source": request.source,
-                    "weak_checkpoint": (
-                        str(request.weak_checkpoint)
-                        if request.weak_checkpoint is not None
-                        else None
-                    ),
-                    "sample_unit": "transition",
-                    "collected_steps": int(collected_steps),
-                    "upstream_revision": OFFICIAL_FADA_SOURCE_REVISION,
-                    "expert_checkpoint": resources.expert_checkpoint,
-                    "expert_checkpoint_sha256": resources.expert_checkpoint_sha256,
-                    "experiment_config_sha256": resources.experiment_config_sha256,
-                    "preprocessing": resources.preprocessing,
-                }
-            )
-        written = time.perf_counter()
-
+        identity_metadata: dict[str, Any] = {
+            "request_id": request.request_id,
+            "scenario": request.scenario,
+            "iteration": int(request.iteration),
+            "checkpoint_path": request.checkpoint_path,
+            "expected_weight_version": int(request.expected_weight_version),
+            "observed_weight_version": observed_version,
+            "producer_pid": producer_pid,
+            "source": request.source,
+            "weak_checkpoint": (
+                str(request.weak_checkpoint)
+                if request.weak_checkpoint is not None
+                else None
+            ),
+            "sample_unit": "transition",
+            "collected_steps": int(collected_steps),
+            "upstream_revision": OFFICIAL_FADA_SOURCE_REVISION,
+            "expert_checkpoint": resources.expert_checkpoint,
+            "expert_checkpoint_sha256": resources.expert_checkpoint_sha256,
+            "experiment_config_sha256": resources.experiment_config_sha256,
+            "preprocessing": resources.preprocessing,
+        }
         metrics: dict[str, Any] = {
             "weight_sync_seconds": synced - started,
             "collect_seconds": collected - synced,
-            "artifact_write_seconds": written - collected,
         }
+        if shared_channel is not None:
+            # The raw batch leaves over the attached channel; the failure path aborts the
+            # transport and re-raises, so no artifact is produced and nothing is retried.
+            send_shared_collection(
+                shared_channel,
+                request,
+                batch,
+                spec=spec,
+                timeout=self._shared_timeout_seconds,
+            )
+            transferred = time.perf_counter()
+            metrics["shared_transfer_seconds"] = transferred - collected
+            response_metadata: dict[str, Any] = {
+                **identity_metadata,
+                "payload_kind": SHARED_PAYLOAD_KIND,
+                "transport_id": request.transport_id,
+            }
+        else:
+            with FADAShardedSourceWriter(
+                request.output_path,
+                official_spec=spec,
+            ) as writer:
+                writer.append(batch)
+                writer.commit(metadata=identity_metadata)
+            written = time.perf_counter()
+            metrics["artifact_write_seconds"] = written - collected
+            response_metadata = identity_metadata
         if recorder is not None:
             # Completed-transaction CPU wall durations measured inside the
             # collection call; appended as flat *_seconds keys only when profiling
@@ -845,21 +920,7 @@ class OfficialFADACollectorWorker:
             num_samples=num_samples,
             worker_pid=producer_pid,
             metrics=metrics,
-            metadata={
-                "source": request.source,
-                "weak_checkpoint": (
-                    str(request.weak_checkpoint)
-                    if request.weak_checkpoint is not None
-                    else None
-                ),
-                "sample_unit": "transition",
-                "collected_steps": int(collected_steps),
-                "upstream_revision": OFFICIAL_FADA_SOURCE_REVISION,
-                "expert_checkpoint": resources.expert_checkpoint,
-                "expert_checkpoint_sha256": resources.expert_checkpoint_sha256,
-                "experiment_config_sha256": resources.experiment_config_sha256,
-                "preprocessing": resources.preprocessing,
-            },
+            metadata=response_metadata,
         )
 
     def _close_resources(self, *, raise_errors: bool) -> None:
@@ -876,6 +937,14 @@ class OfficialFADACollectorWorker:
         if weight_sync is not None:
             try:
                 weight_sync.close()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+        shared_channel = self._shared_channel
+        self._shared_channel = None
+        if shared_channel is not None:
+            try:
+                # Attached side only: the creator owns unlink and reclamation.
+                shared_channel.close()
             except BaseException as exc:  # noqa: BLE001
                 errors.append(exc)
         if errors and raise_errors:

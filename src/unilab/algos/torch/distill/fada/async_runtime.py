@@ -42,6 +42,7 @@ from unilab.algos.torch.distill.runtime.async_runtime import (
 from unilab.algos.torch.distill.runtime.persistent_runtime import PersistentDistillationRuntime
 from unilab.base.registry import ensure_registries
 from unilab.ipc import SharedWeightSync
+from unilab.ipc.shared_tensor_protocol import SharedTensorEndpointProtocol
 from unilab.training import BackendAdapter, create_env
 
 # Compatibility aliases for callers of the former monolithic module.
@@ -320,6 +321,8 @@ def build_official_fada_runtime(
     initial_student: torch.nn.Module,
     request_timeout_seconds: float = 300.0,
     performance_enabled: bool = False,
+    shared_endpoint: SharedTensorEndpointProtocol | None = None,
+    shared_timeout_seconds: float = 300.0,
 ) -> PersistentDistillationRuntime:
     """Compose the official source service without importing its simulator in the parent."""
 
@@ -334,7 +337,12 @@ def build_official_fada_runtime(
         student_loader=student_loader,
         initial_student=initial_student,
         worker_factory=OfficialFADACollectorWorker,
-        worker_kwargs={"spec": spec, "performance_enabled": performance_enabled},
+        worker_kwargs={
+            "spec": spec,
+            "performance_enabled": performance_enabled,
+            "shared_endpoint": shared_endpoint,
+            "shared_timeout_seconds": shared_timeout_seconds,
+        },
         request_timeout_seconds=request_timeout_seconds,
         collector_daemon=False,
     )

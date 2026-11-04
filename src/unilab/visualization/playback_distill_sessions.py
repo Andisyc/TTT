@@ -528,10 +528,14 @@ def create_fada_playback_session(
                 lr=online.learning_rate,
                 max_grad_norm=online.max_grad_norm,
                 device=device_name,
+                mode=online.mode,
                 **({"playback": controller} if official_profile is not None else {}),
             )
+            objective = "action_residual" if online.mode == "action_base" else "expert_trajectory_difference"
+            reference = "current_lora" if online.mode == "trajectory_lora" else "frozen_base"
             log(
-                "Online adaptation enabled: objective=expert_trajectory_difference, "
+                f"Online adaptation enabled: mode={online.mode}, "
+                f"objective={objective}, reference={reference}, "
                 f"prediction_horizon={architecture.prediction_horizon}, "
                 f"window_size={online.window_size}, gamma={online.gamma}, sigma={online.sigma}, "
                 f"warmup_steps={online.warmup_steps}, update_interval={online.update_interval}, "

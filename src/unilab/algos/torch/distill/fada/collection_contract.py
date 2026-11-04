@@ -93,6 +93,63 @@ class OfficialFADACollectionSpec:
         return self.config.get("pred_horizon", 6)
 
 
+_OFFICIAL_OBS_DIM = 64
+_OFFICIAL_ACT_DIM = 29
+_OFFICIAL_COMMAND_DIM = 7
+
+
+def _layout_count(count: int) -> int:
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise ValueError("official FADA layout count must be a positive integer")
+    return count
+
+
+def official_raw_transition_layout(
+    spec: OfficialFADACollectionSpec, count: int
+) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
+    """Canonical shape/dtype metadata for unsampled upstream transitions."""
+
+    rows, horizon = _layout_count(count), spec.prediction_horizon
+    return {
+        "obs": ((rows, _OFFICIAL_OBS_DIM), torch.float32),
+        "current_command": ((rows, _OFFICIAL_COMMAND_DIM), torch.float32),
+        "executed_act": ((rows, _OFFICIAL_ACT_DIM), torch.float32),
+        "expert_act": ((rows, _OFFICIAL_ACT_DIM), torch.float32),
+        "expert_chunk": ((rows, horizon, _OFFICIAL_ACT_DIM), torch.float32),
+        "expert_future_obs_chunk": ((rows, horizon, _OFFICIAL_OBS_DIM), torch.float32),
+        "has_expert_chunk": ((rows,), torch.bool),
+        "has_expert_future_obs_chunk": ((rows,), torch.bool),
+        "strict_label_valid": ((rows,), torch.bool),
+        "reward": ((rows,), torch.float32),
+        "done": ((rows,), torch.bool),
+        "env_id": ((rows,), torch.int32),
+        "episode_id": ((rows,), torch.int64),
+    }
+
+
+def official_window_batch_layout(
+    spec: OfficialFADACollectionSpec, count: int
+) -> dict[str, tuple[tuple[int, ...], torch.dtype]]:
+    """Canonical shape/dtype metadata for history-window training batches."""
+
+    rows = _layout_count(count)
+    history, horizon = spec.history_length, spec.prediction_horizon
+    return {
+        "history_obs": ((rows, history, _OFFICIAL_OBS_DIM), torch.float32),
+        "history_act": ((rows, history, _OFFICIAL_ACT_DIM), torch.float32),
+        "history_valid_mask": ((rows, history), torch.bool),
+        "current_command": ((rows, _OFFICIAL_COMMAND_DIM), torch.float32),
+        "target_actions": ((rows, horizon, _OFFICIAL_ACT_DIM), torch.float32),
+        "target_next_observations": ((rows, horizon, _OFFICIAL_OBS_DIM), torch.float32),
+        "trajectory_target_actions": ((rows, horizon, _OFFICIAL_ACT_DIM), torch.float32),
+        "trajectory_target_next_observations": (
+            (rows, horizon, _OFFICIAL_OBS_DIM),
+            torch.float32,
+        ),
+        "trajectory_target_valid": ((rows,), torch.bool),
+    }
+
+
 @dataclass(frozen=True)
 class OfficialFADASourceBatch:
     """Preserve official shadow labels and independently valid real trajectories."""
@@ -127,26 +184,14 @@ class OfficialFADASourceBatch:
         count = self.num_samples
         if count <= 0:
             raise ValueError("official source batches must contain samples")
-        history, horizon = spec.history_length, spec.prediction_horizon
-        shapes = {
-            "history_obs": (count, history, 64),
-            "history_act": (count, history, 29),
-            "history_valid_mask": (count, history),
-            "current_command": (count, 7),
-            "target_actions": (count, horizon, 29),
-            "target_next_observations": (count, horizon, 64),
-            "trajectory_target_actions": (count, horizon, 29),
-            "trajectory_target_next_observations": (count, horizon, 64),
-            "trajectory_target_valid": (count,),
-        }
+        layout = official_window_batch_layout(spec, count)
         mask_names = {"history_valid_mask", "trajectory_target_valid"}
         device = self.current_command.device
-        for name, shape in shapes.items():
+        for name, (shape, dtype) in layout.items():
             value = getattr(self, name)
             if not isinstance(value, torch.Tensor) or tuple(value.shape) != shape:
                 raise ValueError(f"official {name} must have shape {shape}")
-            expected_dtype = torch.bool if name in mask_names else torch.float32
-            if value.dtype != expected_dtype or value.device != device:
+            if value.dtype != dtype or value.device != device:
                 raise ValueError(f"official {name} has inconsistent dtype/device")
             if name not in mask_names and not bool(torch.isfinite(value).all()):
                 raise ValueError(f"official {name} must be finite")
@@ -197,6 +242,7 @@ class OfficialFADACollectRequest(DaggerCollectRequest):
     source: Literal["optimal", "suboptimal", "online"]
     weak_checkpoint: str | None = None
     collect_steps: int | None = None
+    transport_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.scenario != OFFICIAL_FADA_SCENARIO:
@@ -210,6 +256,11 @@ class OfficialFADACollectRequest(DaggerCollectRequest):
             or not isinstance(self.collect_steps, int) or self.collect_steps <= 0
         ):
             raise ValueError("collect_steps must be a positive integer or None")
+        if self.transport_id is not None:
+            if not isinstance(self.transport_id, str) or not self.transport_id:
+                raise ValueError("shared collection requires a nonempty transport_id")
+            if self.output_path != "":
+                raise ValueError("shared collection requires an empty output_path")
 
 
 @dataclass(frozen=True)
@@ -244,21 +295,16 @@ class OfficialFADARawTransitionBatch:
     def validate(self, spec: OfficialFADACollectionSpec) -> OfficialFADARawTransitionBatch:
         if self.obs.ndim != 2 or self.num_samples <= 0:
             raise ValueError("official raw transitions must be a nonempty matrix")
-        count, horizon = self.num_samples, spec.prediction_horizon
-        shapes = {
-            "obs": (count, 64), "current_command": (count, 7),
-            "executed_act": (count, 29), "expert_act": (count, 29),
-            "expert_chunk": (count, horizon, 29),
-            "expert_future_obs_chunk": (count, horizon, 64),
-        }
-        boolean = {"has_expert_chunk", "has_expert_future_obs_chunk", "strict_label_valid", "done"}
+        count = self.num_samples
+        layout = official_raw_transition_layout(spec, count)
         for item in fields(self):
             name, value = item.name, getattr(self, item.name)
-            expected_shape = shapes.get(name, (count,))
-            dtype = torch.bool if name in boolean else (
-                torch.int32 if name == "env_id" else torch.int64 if name == "episode_id" else torch.float32
-            )
-            if tuple(value.shape) != expected_shape or value.dtype != dtype or value.device.type != "cpu":
+            expected_shape, dtype = layout[name]
+            if (
+                tuple(value.shape) != expected_shape
+                or value.dtype != dtype
+                or value.device.type != "cpu"
+            ):
                 raise ValueError(f"official raw {name} has invalid shape, dtype or device")
             if value.is_floating_point() and not bool(torch.isfinite(value).all()):
                 raise ValueError(f"official raw {name} must be finite")

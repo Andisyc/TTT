@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from typing import Literal
 
 import torch
 
@@ -71,53 +72,59 @@ def _trajectory_masks(
 
 @torch.no_grad()
 def build_expert_samples(
-    base_idm,
+    reference_idm,
     trajectories: Sequence[FADATrajectoryPair],
     *,
     gamma: float,
     runtime_spec: FADARuntimeSpec | None = None,
+    mode: Literal["trajectory_base", "action_base", "trajectory_lora"] = "trajectory_base",
 ) -> tuple[FADAOnlineSample, ...]:
-    """Translate matched futures through the frozen base, preserving executed snapshots."""
+    """Build fixed first-action targets without mutating the reference Tracker.
+
+    trajectory_*: a_t + gamma * (T(S_predict) - T(S_real)).
+    action_base: a_t + gamma * (a_t - T(S_real)).
+    Base modes require frozen parameters; trajectory_lora accepts trainable
+    parameters under no_grad. Every reference must already be in eval mode.
+    """
+    if mode not in ("trajectory_base", "action_base", "trajectory_lora"):
+        raise ValueError(f"unsupported online target mode: {mode!r}")
     if not trajectories:
         raise ValueError("expert labels require a non-empty trajectory window")
     if not math.isfinite(gamma) or gamma < 0.0:
         raise ValueError("gamma must be finite and non-negative")
-    spec = _resolve_runtime_spec(base_idm, runtime_spec)
+    spec = _resolve_runtime_spec(reference_idm, runtime_spec)
     if spec.family == "official" and any(
         pair.snapshot.observation_contract != FADA_OFFICIAL_COMPACT_OBSERVATION_CONTRACT
         for pair in trajectories
     ):
         raise ValueError("official expert labels require official_compact_64_v1 snapshots")
-    if any(module.training for module in base_idm.modules()) or any(
-        parameter.requires_grad for parameter in base_idm.parameters()
+    if any(module.training for module in reference_idm.modules()):
+        raise ValueError("reference IDM must be in eval mode")
+    if mode != "trajectory_lora" and any(
+        parameter.requires_grad for parameter in reference_idm.parameters()
     ):
-        raise ValueError("base IDM must be frozen and in eval mode")
-    reference = next(base_idm.parameters())
+        raise ValueError("base IDM must be frozen")
+    reference = next(reference_idm.parameters())
     snapshots = tuple(pair.snapshot for pair in trajectories)
     observations = torch.cat([snapshot.observation_history for snapshot in snapshots]).to(reference)
     actions = torch.cat([snapshot.action_history for snapshot in snapshots]).to(reference)
-    nominal = torch.cat([snapshot.nominal_future for snapshot in snapshots]).to(reference)
     realized = torch.cat([pair.realized_future for pair in trajectories]).to(reference)
     executed = torch.cat([snapshot.action_snapshot for snapshot in snapshots]).to(reference)
-    if spec.family == "official":
-        commands = torch.cat([snapshot.command for snapshot in snapshots]).to(reference)
-        masks = _trajectory_masks(spec, snapshots, reference)
-        base_nominal = invoke_fada_idm(
-            base_idm, spec, observations, actions, commands, nominal, history_valid_mask=masks
-        )[:, 0]
-        base_realized = invoke_fada_idm(
-            base_idm, spec, observations, actions, commands, realized, history_valid_mask=masks
-        )[:, 0]
+    commands = torch.cat([snapshot.command for snapshot in snapshots]).to(reference) if spec.family == "official" else None
+    masks = _trajectory_masks(spec, snapshots, reference)
+    reference_realized = invoke_fada_idm(
+        reference_idm, spec, observations, actions, commands, realized, history_valid_mask=masks
+    )[:, 0]
+    if mode == "action_base":
+        reference_nominal = executed
     else:
-        base_nominal = invoke_fada_idm(
-            base_idm, spec, observations, actions, None, nominal
+        nominal = torch.cat([snapshot.nominal_future for snapshot in snapshots]).to(reference)
+        reference_nominal = invoke_fada_idm(
+            reference_idm, spec, observations, actions, commands, nominal, history_valid_mask=masks
         )[:, 0]
-        base_realized = invoke_fada_idm(
-            base_idm, spec, observations, actions, None, realized
-        )[:, 0]
-    if base_nominal.shape != executed.shape or base_realized.shape != executed.shape:
+    if reference_nominal.shape != executed.shape or reference_realized.shape != executed.shape:
         raise ValueError("expert predictions must match first-action snapshots")
-    targets = executed + gamma * (base_nominal - base_realized)
+    targets = executed + gamma * (reference_nominal - reference_realized)
     return tuple(
         FADAOnlineSample(pair, target[None].to(pair.snapshot.action_snapshot))
         for pair, target in zip(trajectories, targets)

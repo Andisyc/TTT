@@ -519,28 +519,48 @@ FADAOracleCheckpointGateway
 
 ## 官方 FADA Locomotion 源训练
 
-正式入口为 `scripts/train_distill.py --config-name official_fada`，配置位于 `conf/distill/official_fada.yaml`，不再继承旧 SAC teacher、MuJoCo task 或 66/3 站走课程。非 FADA 蒸馏、旧 checkpoint 播放和现有在线 LoRA 方法保持独立。
+正式入口为 `scripts/train_distill.py --config-name official_fada`，配置位于 `conf/distill/official_fada.yaml`。官方入口现在只走共享轨迹收发、有限学习流水线、内存权重发布及单任务配对存盘，无加速开关或磁盘 fallback。非 FADA 蒸馏、旧 checkpoint 播放和现有在线 LoRA 方法保持独立。
 
-在仓库根目录启动；将下列路径替换为真实官方 checkout 和 PPO 产物：
+在仓库根目录启动；先将 `UPSTREAM_ROOT` 和 `EXPERT_CHECKPOINT` 设置为真实官方 checkout 和 PPO 产物的绝对路径。以下命令开启已有性能计时，便于服务器对照：
 
 ```bash
+: "${UPSTREAM_ROOT:?请设置固定版本官方 checkout 的绝对路径}"
+: "${EXPERT_CHECKPOINT:?请设置官方 PPO checkpoint 的绝对路径}"
 PYTHONPATH="$PWD/src" uv run --frozen --no-sync python scripts/train_distill.py \
   --config-name official_fada \
-  training.fada.upstream_root=/absolute/path/to/FADA \
-  training.fada.config.expert_checkpoint=/absolute/path/to/oracle_run/model_5000.pt
+  training.fada.upstream_root="$UPSTREAM_ROOT" \
+  training.fada.config.expert_checkpoint="$EXPERT_CHECKPOINT" \
+  training.fada.performance.enabled=true
 ```
 
 官方源码固定为 `LeCAR-Lab/FADA@290b3a9c5c0ebe2e9851b61350617544be05e9bc`。需要官方可读取的 PPO 配套保存配置、弱 checkpoint 历史，以及 Linux/CUDA/官方原生仿真环境；现有 MuJoCo SAC/APPO 和 66/3 学生不能替代。命令不会下载权重或安装依赖。
 
+### 执行预算与恢复（第 6.5 步）
+
+执行预算在 `training.fada.execution`，与官方 `training.fada.config` 算法参数隔离，不写入学习 checkpoint、缓存或来源身份。配置使用 bytes，默认如下；这是声明的 buffer 上限，不是进程总 RAM/VRAM 需求。
+
+| 配置键 | 默认值 | 覆盖范围 |
+|---|---:|---|
+| `transport_budget_bytes` | 128 MiB | 全部共享槽的 raw payload；分配还需 metadata/header 空间 |
+| `prefetch_budget_bytes` | 1 GiB | host/device 槽位副本及有界采样/拼接临时峰值 |
+| `pending_raw_budget_bytes` | 2 GiB | 一次已采集、待入 Replay 的自有 raw 暂存 |
+| `slots` | 2 | 原始轨迹传输槽位数 |
+| `prefetch_batches` | 2 | 学习槽位总数，含正在消费及 in-flight batch |
+
+解析会在建模型/worker 前拒绝未知键、bool/非正整数和无法容纳配置工作量的预算。Linux 还会检查 `/dev/shm` 可用容量，容器必须提供足够共享内存；pinned RAM、Replay、模型、原生环境和 shadow 的 RAM/VRAM 需求仍需分别留足。容量不足就调整对应 execution 预算或运行环境，不会自动减少环境数、样本、更新或切换 device；例如只改暂存上限可追加 `training.fada.execution.pending_raw_budget_bytes=4294967296`。
+
+恢复时，在上述命令追加 `training.fada.config.resume_checkpoint="$CHECKPOINT"`，其中 `CHECKPOINT` 必须指向实际学习 checkpoint；保留它引用的 online train/val NPZ 文件及同身份的 offline caches。不要把裸学生权重当作完整学习恢复，也不要用额外 `resume_online_buffer` 覆盖正确的配对引用。新 run 默认仍可能重新执行 warmup（`force_warmup_train=true`）；已有 cache 不等于已经跳过学习。上传代码不会热切换已启动进程，新路径在使用更新配置启动或恢复后生效。
+
+
 ### 采集、Replay 与外循环
 
-- `fada.async_runtime.build_official_fada_runtime` 显式接收 `OfficialFADACollectionSpec`、`student_loader` 和 `initial_student`。先通过同一 Runner 的 `prepare` 获取实际 Oracle 身份、预处理、配置和弱策略列表，再保存完整初始 checkpoint、`activate_checkpoint` 并采集；没有缺失文件时随机初始化的 loader 回退。
+- `fada.async_runtime.build_official_fada_runtime` 接收真实 `OfficialFADACollectionSpec`、`initial_student` 和共享端点。先由同一 Runner 的 `prepare` 核准 Oracle 身份、预处理、配置和弱策略列表，再通过 `activate_checkpoint(..., state_dict=...)` 从当前内存发布权重；不为发布重建学生模型或调用推理 loader。
 - `OfficialFADACollectRequest` 明确指定 `optimal` / `suboptimal` / `online`；弱策略请求另带 `weak_checkpoint`，可选 `collect_steps` 以跨全部 env 的原始 transition 总数计。一个常驻 worker 复用官方 env、Trainer 和固定 Oracle shadow；不调用官方完整训练主循环。
-- 采集产物使用同一 `FADAShardedSourceWriter` 的官方 schema v8，经 `open_official_fada_source_artifact(...).iter_batches()` 读取原始 13 字段：obs、command、executed/expert action、两类 expert chunk 及有效标志、strict-label 标志、reward、done、env/episode ID。旧官方窗口 v7 不能冒充原始 Replay；历史 v5 reader 不变。
+- 原始 13 字段（obs、command、executed/expert action、两类 expert chunk 及有效标志、strict-label 标志、reward、done、env/episode ID）直接经 typed 共享槽传输。接收方持有自有 raw 暂存，核准尾块/来源/版本后才入 Replay；正式训练不创建 `source_batches`/raw shard 交接文件。原 schema v8 artifact API 仍用于明确的文件数据用途，旧窗口 v7 不能冒充 raw Replay，历史 v5 reader 不变。
 - 父进程的 `OfficialFADAReplayBuffer` 复用固定上游纯 NumPy ReplayBuffer，按轨迹抽取、train/val 划分和 random/fifo 淘汰；容量单位为 transition。离线集可增长，online 跨轮积累；更新时重新 `sample_chunk`，而不是反复训练 worker 预抽的静态窗口。跨 shard 的完整 episode 统一判断。
-- 唯一外循环执行 `prepare → offline 采集/缓存 → warmup → DAgger 采集/更新 → save/publish → 下一轮 → close`。optimal 按固定 horizon 分次采集并保留完整 episode；suboptimal 轮换弱 checkpoint 至目标数据量。官方缓存、warmup 开关优先级和恢复语义保留。
+- 唯一外循环保留 offline 采集/缓存和 warmup；optimal 按固定 horizon 保留完整 episode，suboptimal 轮换弱 checkpoint 至目标量。学习阶段用有限 CPU 预取与设备搬运流水线，采样配额、增强、dropout 和两阶段更新顺序不变。每轮结束从内存发布新权重，再让配对存盘与下一轮采集重叠；存盘完成前不修改 learner/Replay。
 - 第一轮 online 前发布 warmup 后权重，每轮更新后发布新权重；`save_every_iter` 仅控制保留的周期快照，不降低权重发布频率。恢复包含模型、两组 optimizer、更新/轮次/采集计数及对应 online train/val Replay；不承诺物理环境或 RNG 的精确断点重放。
-- 此路径使用 non-daemon collector 以支持官方 shadow 子进程，继续沿用原错误通道、版本屏障和 POSIX 进程组回收。仍是轮次 barrier，不宣称已实现采学重叠。
+- non-daemon collector 支持官方 shadow 子进程，错误通道、版本屏障和进程组回收保持不变。重叠的是 batch 搬运/学习及存盘/采集，不是用旧策略跨轮采集；原生仿真和 strict-shadow 算法没有被替换。
 
 ### 学生与学习接口
 
@@ -565,10 +585,47 @@ CPU 诊断已通过正式 loader/factory/session 的推理、完整 K 步收集�
 
 在官方源训练命令末尾追加 `training.fada.performance.enabled=true` 即可开启；默认关闭。开关位于原生算法配置之外，不进入 checkpoint、缓存或 Oracle 身份，也不改变采样量、更新量、loss 或权重发布规则。
 
-- 控制台在 warmup 完成、每轮 DAgger 和最终关闭后输出 `[FADA PERF]`；字段为累计值，比较相邻报告可得到本轮增量。最终返回值另含 `performance`。
-- `wall_seconds` 覆盖初始化、采集 RPC、artifact 读取/Replay 入库、采样/H2D、IDM 与 Planner 前反向/optimizer、保存、发布和关闭。最终 `total_elapsed` 的范围为训练 owner 初始化至 runtime 关闭，不含 CLI 启动前的 Python 导入；整条命令的耗时应在实际对照时另外计入。
-- `worker_wall_seconds` 保留真实资源初始化、同步、完整 rollout、CPU 打包和写盘耗时。rollout 包含原生 Oracle/shadow/环境事务，不冒充纯物理计算时间。父进程 RPC、worker 总时长与子阶段互相包含，不能直接相加。
+- 控制台在 warmup 完成、每轮提交和最终关闭后输出 `[FADA PERF]`；结果为累计值，最终返回值另含 `performance`。提交边界可能已经包含下一轮采集，不能把相邻行直接当作严格的单轮物理耗时；同工作量对照优先看完整边界及实际计数。
+- `wall_seconds` 覆盖初始化、采集 RPC、Replay 入库、batch 获取等待、IDM/Planner 前反向与 optimizer、发布和关闭。`batch_build` 覆盖实际取得 batch 的等待，不包含随后学习。最终 `total_elapsed` 覆盖训练 owner 初始化至关闭，不含此前 CLI/Python 导入；端到端耗时应另计。
+- `worker_wall_seconds` 汇总已完成的 collector、独立 CPU sampler 和配对提交任务耗时。rollout 含原生 Oracle/shadow/环境事务，不冒充纯物理计算；CPU sampler 不冒充 CUDA H2D，未测阶段不补零。RPC、worker、保存与子阶段存在包络和重叠，不能相加当作总时间。
 - `cuda_stream_seconds` 仅在 CUDA 路径记录本进程当前 stream 的 event 间隔，不是整个 GPU 或 shadow 子进程的 kernel 总耗时；仅在报告边界统一解析，不逐算子强制同步。CPU 下此字段为空。
 - `counters` 区分实际采集的原始 transition、抽取的训练窗口、学习更新和 online 轮数；窗口计数不是新增物理数据量。未执行的阶段不填假零值。
 
 已用一套 CPU 诊断短链路验证计时关闭/开启时模型、两组 AdamW、loss、RNG、保存轨迹及发布版本逐项一致，走通 warmup 和两轮 DAgger。原生仿真、CUDA 计时及官方/TTT 性能对照尚未运行；本次没有实现或宣称训练加速。
+
+### 加速执行契约（第 6.1 步）
+
+- `collection_contract.py` 的 `official_raw_transition_layout(spec, count)` 和 `official_window_batch_layout(spec, count)` 统一给出 raw 13 字段、window 9 字段的 `(shape, dtype)`；现有 batch validator 已复用，H/K 来自 spec，bool mask、int32 env ID、int64 episode ID 不转为 float。
+- `execution_contract.py` 的 `FADAExecutionLimits`、`layout_nbytes`、`raw_chunk_rows` 和 `validate_prefetch_budget` 核算显式字节预算。`raw_chunk_rows` 接收每个字段首维为 1 的单行布局；预算覆盖所有槽位的数组 payload。预取调用方须列出每份保留的 host/device staging 副本，预算不代表整个模型或模拟器进程内存。
+- `FADAChunkDescriptor.validate` 对照原采集 request 及接收方持有的游标/槽位代次检查版本、来源、行范围和尾块；`validate_phase_boundary` 在成功提交阶段前要求计划、抽取和消费次数相等且无剩余批次，不修改 RNG。
+
+一次 CPU 契约场景已通过现有 batch 消费接口、预算与错误描述符拒绝检查，Python/NumPy/Torch RNG 状态不变。本步没有接入共享内存、锁、预取线程或 CUDA 异步搬运，没有修改训练入口/默认值，也不代表并发安全或提速已经完成；这些属于后续 6.2–6.5。
+
+### 原始轨迹共享通道（第 6.2 步）
+
+- `ipc.shared_tensor_channel.SharedTensorChannel.create(layout, slots=2)` 提供 typed、bounded、lossless 的单生产者/单消费者通道；布局由 `fada.shared_collection.raw_transport_layout(spec, limits, max_rows=...)` 核算。端点通过 `build_official_fada_runtime(shared_endpoint=channel.endpoint, ...)` 的 worker 启动参数注入，不在运行中的请求队列传同步句柄。
+- 共享请求显式设置 `OfficialFADACollectRequest.transport_id=channel.transport_id`、`output_path=""`，由 `collect_shared_raw(runtime, request, channel, spec=..., max_rows=..., pending_budget_bytes=..., expected_metadata=prepare.metadata, timeout=...)` 收集；接收泵先于阻塞 RPC 启动。返回值为自有 CPU raw batch 与原 Dagger result，只有尾块、行数、来源/权重版本和 Oracle/预处理身份全部匹配才成功，不提前写入 Replay。
+- 共享槽写满会等待；读取是租约，复制后才释放。`abort()` 使阻塞收发退出且通道永久失效；worker 只关闭附件，调用方在结束本地收发并关闭 runtime 后负责 creator 的 `cleanup()`。失败不重置或回退磁盘。不带 transport ID 的现有显式 artifact 请求保持原路径。
+- 传输的 `timeout` 覆盖原生采样等待与接收，须高于预期采集耗时；worker 的 `shared_timeout_seconds` 单独限制发送。不能中断任意原生 kernel，既有 Runner 的请求超时/进程组回收继续生效。槽位预算外另有固定元数据/header 开销，创建时会检查共享内存容量；接收暂存区单独受 `max_rows`/`pending_budget_bytes` 限制，不承诺 zero-copy。
+
+CPU spawn 场景已走通真实 Runner/collector 的共享分支，连续两次请求、多于槽位数的分块、partial 尾块与大整数 ID 保真；未生成原始轨迹文件。背压、取消、坏版本与暂存预算拒绝、无接收线程泄漏及共享段回收检查通过。原生资源/物理采样使用明确诊断替身，未跑仿真、GPU或训练。正式训练默认路由尚未切换，接线与默认配置仍由 6.4/6.5 完成；本步通过不代表端到端提速已完成。
+
+### 学习端批次流水线（第 6.3 步）
+
+- `fada.batch_pipeline.OfficialFADABatchPipeline` 显式接收 `sample_cpu=replay.sample_update`、`spec`、`training_config`、`mode`、`planned_updates`、`device` 和 `FADAExecutionLimits`。在 `with pipeline:` 内逐次 `with pipeline.batch() as (idm_batches, planner_batch):` 消费；batch 借用只在租约内有效，不能在退出后长期保存其 tensor 引用。
+- 单采样 worker 保持现有 NumPy 抽样顺序，有限阶段只抽计划次数。`prefetch_batches` 是槽位总数，包含正在消费的 batch；预算包含全部保留的 host/device 副本及额外采样/Planner 拼接临时峰值。CPU 使用普通可复用 buffer；CUDA 使用 pinned host、显式设备 buffer、copy stream 和槽位 ready/consumed 事件。保存或修改 Replay 前必须退出阶段，等待采样与本流水线的事件完成；异常取消不伪装回滚已经消耗的 RNG。
+- `OfficialFADALearner.update(..., collect_metrics=False)` 仍执行完整 IDM/Planner 更新、裁剪和计数，只返回空指标字典。默认 `True` 保留原报告字段和加权口径，将所需 detached 标量集中转 CPU；正式调度后续可仅在末步/报告边界收集。没有删去零系数 Planner 前向，也没有更改 dropout、增强、精度或来源配额。
+
+第 6.3 步一次 CPU 场景对照了改前 Replay 采样 owner/learner 与新流水线：实际官方小型 Transformer 在噪声、dropout 和裁剪下，窗口、配额、loss、梯度、两 AdamW、权重及 RNG 一致；外部存储是明确的诊断 NumPy 窗口。指标开关、零阶段、预算和异常退出检查通过，无 sampler 线程泄漏。流水线已成为正式入口默认路径；CUDA pinned/stream/event 行为及端到端性能仍需服务器验证。
+
+### 共享执行与配对提交集成（第 6.4 步）
+
+- `run_fada_persistent_async` 必需的 `execution_limits`/`pending_raw_budget_bytes` 由正式入口自动解析传入；无需额外 Python 参数启用，也没有磁盘/顺序执行的过渡分支。配置容量不足直接拒绝，缓存和配对恢复用持久化文件继续保留。
+- `PersistentDistillationRuntime.activate_checkpoint(path, state_dict=learner.policy.state_dict())` 使用现有共享权重通道直接发布，不调用推理 loader 或重读磁盘；path 是后续提交目标与请求身份，发布成功不表示该文件已提交。省略 state_dict 的既有文件调用仍可用。
+- `Replay.add_raw_batch` 与 artifact 入口共用身份检查、完整 episode 过滤和单事务 ID 重映射。新执行路径所有来源直接入内存事务，不产生 raw trajectory/shard 交接文件；offline cache 与恢复用 NPZ/checkpoint 继续保留。
+- 每轮有限学习结束后，先发布最新权重，再由 `FADAIterationCommitter` 保存本轮 Replay/模型；同时采集下一轮到独立暂存区。写盘期间 learner/optimizer/Replay 只读，必须 wait 提交成功后才能入库和学习。writer 最多一个任务，后台错误回传；返回/关闭前等待，未完成的持久化不能冒充成功进度。
+- 提交先完成独立 Replay train/val 文件，再用原保存接口原子替换 latest，历史 checkpoint 所引用的 Replay 保留；不修改存储格式、不复制整份 Replay。仅回收本提交器拥有且已无历史引用的旧快照，不删除用户 resume 文件。
+
+第 6.4 步一次 CPU 集成通过 warmup→两轮→恢复，顺序参考隔离文件 loader 随机初始化副作用后，模型、两 optimizer、计数、Replay 大小和指标一致。确定性 writer gate 证明采集可重叠、Replay 入库等提交；提交失败保留旧配对和历史引用。第 6.5 步随后从 Hydra 配置经实际脚本 owner 默认运行同一链路，与 6.4 显式路径一致，并通过 strict 恢复、预算提前拒绝和失败关闭检查；预算未进入保存的算法/source 身份。两步均使用明确诊断 native/外部存储依赖，不是原生/GPU或策略质量验收。
+
+服务器验收由操作者执行，不自动下载、连接或启动训练。保持同一 GPU、官方权重/初始学生、环境数、H/K、batch、source 配额、更新次数和 cache 口径；分别比较冷启动与稳态、实际 transition/update 数、端到端耗时和 RAM/VRAM 峰值。复用已有可比基线，不为“更放心”重跑；没有同工作量改善证据就报告“未证实提速”，不能仅靠局部阶段或 CPU 诊断宣称加速倍率。

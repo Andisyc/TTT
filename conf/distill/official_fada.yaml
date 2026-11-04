@@ -12,6 +12,15 @@ training:
     experiment_override_args: []
     performance:
       enabled: false
+    # Default buffer ceilings for the single official execution path (bytes/slots only).
+    # They bound the declared transport/staging buffers, not whole-process or device memory;
+    # a workload that does not fit is rejected instead of being silently reduced.
+    execution:
+      transport_budget_bytes: 134217728
+      prefetch_budget_bytes: 1073741824
+      pending_raw_budget_bytes: 2147483648
+      slots: 2
+      prefetch_batches: 2
     config:
       expert_checkpoint: null
       command_profile: locomotion

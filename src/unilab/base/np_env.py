@@ -68,6 +68,7 @@ class NpEnv(ABEnv):
         self._init_randomization_applied = False
         self._nan_guard: NanGuard | None = None
         self._autoreset = True
+        self._step_measurement_callback: Callable[[NpEnvState, np.ndarray | None], None] | None = None
         self._nan_guard_dump_model_file = self._resolve_nan_guard_model_file()
         self._physics_guard_max_abs: float | None = None
         self._physics_guard_trips = 0
@@ -87,6 +88,28 @@ class NpEnv(ABEnv):
     @property
     def state(self) -> Optional[NpEnvState]:
         return self._state
+
+    def get_base_ang_vel(self) -> np.ndarray:
+        """Forward world-frame base angular velocity through the public contract."""
+        return np.asarray(self._backend.get_base_ang_vel())
+
+    def get_actuated_joint_names(self) -> tuple[str, ...]:
+        """Return the backend-declared actuator joint order."""
+        return tuple(self._backend.get_actuated_joint_names())
+
+    def set_step_measurement_callback(
+        self, callback: Callable[[NpEnvState, np.ndarray | None], None] | None,
+    ) -> None:
+        """Install one read-only observer after completion and BEFORE autoreset.
+
+        The observer must copy retained values and must not mutate state. The
+        second argument identifies physics-guard rows whose original physical
+        truth was already lost. Exceptions propagate: recording cannot silently
+        fail while the experiment continues. None detaches the observer.
+        """
+        if callback is not None and self._step_measurement_callback is not None:
+            raise RuntimeError("a step measurement observer is already installed")
+        self._step_measurement_callback = callback
 
     def refresh_state(self) -> NpEnvState:
         """Recompute observations from the current physics without stepping."""
@@ -282,6 +305,8 @@ class NpEnv(ABEnv):
         np.logical_or(self._state.truncated, truncated, out=self._state.truncated)
 
         self._on_step_completed(self._state)
+        if self._step_measurement_callback is not None:
+            self._step_measurement_callback(self._state, blown_indices)
         done = self._state.terminated | self._state.truncated
         t0 = time.perf_counter()
         if self._autoreset and np.any(done):

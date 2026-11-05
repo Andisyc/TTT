@@ -443,7 +443,10 @@ class G1WalkControlBindings:
                     else self._dynamic_mode_mask(state.info).astype(bool) if freeze_inactive
                     else np.ones((self._num_envs,), dtype=bool)
                 ),
-                delta=self._gait_phase_delta,
+                delta=(
+                    2.0 * np.pi * self._cfg.ctrl_dt / state.info["mq_gait_period"]
+                    if self._motion_quality_provider is not None else self._gait_phase_delta
+                ),
                 enabled=gait_enabled,
                 freeze_inactive=freeze_inactive,
                 stand_phase=(

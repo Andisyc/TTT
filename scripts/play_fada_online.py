@@ -78,11 +78,14 @@ def main(cfg: DictConfig) -> None:
         + ("ENABLED" if online_enabled else "disabled")
     )
 
+    from unilab.visualization.experiment_recording import experiment_recording_run
+
     try:
-        if recording.enabled:
-            record_fada_playback(session, args, recording, render_config=render_config)
-        else:
-            _run_viewer(session, args, render_config)
+        with experiment_recording_run(session):
+            if recording.enabled:
+                record_fada_playback(session, args, recording, render_config=render_config)
+            else:
+                _run_viewer(session, args, render_config)
     finally:
         session.wrapped_env.close()
 

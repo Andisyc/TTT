@@ -69,6 +69,8 @@ RIGHT_FOOT_CONTACT_SENSORS = [f"right_foot_contact_{i}" for i in range(4)]
 
 class G1WalkRewardBindings:
     def _init_reward_functions(self):
+        if self._motion_quality_provider is not None:
+            return
         self._reward_fns: dict[str, Any] = {
             "tracking_lin_vel": self._reward_tracking_lin_vel,
             "tracking_ang_vel": rewards.tracking_ang_vel,
@@ -301,6 +303,8 @@ class G1WalkRewardBindings:
         )
 
     def _compute_reward(self, info: dict, linvel, gyro, gravity, dof_pos, dof_vel) -> np.ndarray:
+        if self._motion_quality_provider is not None:
+            return self._motion_quality_provider.compute(info)
         cfg = self._reward_cfg
         ctx = self._build_reward_context(info, linvel, gyro, gravity, dof_pos, dof_vel)
         reward = self._compute_mode_reward(ctx, cfg)

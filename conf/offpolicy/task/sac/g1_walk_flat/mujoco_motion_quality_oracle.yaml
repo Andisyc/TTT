@@ -1,0 +1,159 @@
+# @package _global_
+# Independent SAC Oracle using UniLab's privileged learner and double-buffer runner.
+# Versioned Oracle artifacts support full learner resume and nominal playback.
+defaults:
+  - _self_
+
+oracle:
+  identity: motion_quality_oracle_v1
+  observation_schema: g1_walk_privileged_v1
+  reward_profile: unitree_motion_quality_v1
+  checkpoint_format: unilab_motion_quality_oracle_v1
+  resume_checkpoint: null
+
+training:
+  task_name: G1WalkFlat
+  sim_backend: mujoco
+  no_play: true
+  no_sync_collection: false
+  env_steps_per_sync: 1
+  replay_prefetch_mode: one_tick
+  num_gpus: 1
+  log_dir: null
+
+# Applied only after restoring the saved training configuration for playback.
+play_profile:
+  enabled: true
+  env:
+    noise_config:
+      level: 0.0
+    runtime_payload:
+      enabled: false
+    domain_rand:
+      randomize_reset_pose: false
+      randomize_kp: false
+      randomize_kd: false
+      randomize_ground_friction: false
+      randomize_base_mass: false
+
+algo:
+  runtime_impl: motion_quality_privileged_sac_v1
+  runtime_resolver: unilab.training.oracle.runtime:resolve_motion_quality_oracle_runtime
+  load_run: "-1"
+  actor_warm_start_checkpoint: null
+  actor_warm_start_adapter: null
+  seed: 1
+  num_envs: 2048
+  batch_size: 8192
+  learning_starts: 10
+  updates_per_step: 8
+  max_iterations: 5000
+  save_interval: 240
+  gamma: 0.99
+  obs_normalization: true
+  use_symmetry: false
+  symmetry_mirror_loss_coeff: 0.0
+  value_support_min: -30.0
+  value_support_max: 30.0
+  actor:
+    fixed_privileged_input: false
+    priv_info_embed_dim: 32
+    priv_mlp_hidden_dims: [256, 128, 32]
+    priv_info_normalization: true
+  algo_params:
+    alpha_init: 0.001
+    target_entropy_ratio: 0.0
+
+# Scene, nominal joint positions, and PD gains remain owned by the common G1 task.
+env:
+  ctrl_dt: 0.02
+  mode_observation: false
+  gait_phase_enabled: true
+  gait_phase_init_mode: offset_phase
+  gait_clock_mode: continuous
+  control_config:
+    action_scale: 1.0
+    simulate_action_latency: false
+  command_gated_phase_contact:
+    enabled: false
+  fada_privileged_observation:
+    enabled: true
+    schema: g1_fada_privileged_v1
+  commands:
+    vel_limit: [[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]]
+    small_xy_threshold: 0.0
+    dead_zone_enabled: false
+    heading_command: false
+    resampling_time: 10.0
+    rel_standing_envs: 0.2
+    rel_transition_envs: 0.0
+  curriculum:
+    enabled: false
+  noise_config:
+    level: 1.0
+    scale_gyro: 0.0
+    scale_gravity: 0.0
+    scale_joint_angle: 0.01
+    scale_joint_vel: 0.1
+    scale_linvel: 0.0
+  domain_rand:
+    randomize_reset_pose: true
+    randomize_kp: true
+    kp_multiplier_range: [0.9, 1.1]
+    randomize_kd: true
+    kd_multiplier_range: [0.9, 1.1]
+    randomize_ground_friction: true
+    ground_friction_multiplier_range: [0.8, 1.2]
+    randomize_base_mass: true
+    added_mass_range: [-1.5, 1.5]
+    randomize_body_mass: false
+    random_com: false
+    randomize_gravity: false
+    randomize_dof_armature: false
+    randomize_dof_position_bias: false
+    randomize_control_delay: false
+    torque_rfi_fraction: 0.0
+    push_robots: false
+    actuator_strength:
+      enabled: false
+      curriculum_enabled: false
+      group_curriculum_enabled: false
+
+# Profile-specific term names and parameters; not the historical G1 reward dispatch.
+reward:
+  gait_frequency: 1.0
+  gait_period_randomization_width: 0.2
+  tracking_sigma: 0.25
+  base_height_target: 0.78
+  min_base_height: 0.3
+  max_tilt_deg: 65.0
+  gait_duty_factor: 0.55
+  contact_force_threshold: 1.0
+  # History is three control ticks (60 ms), not simulator substeps.
+  contact_history_steps: 3
+  min_command_threshold: 0.1
+  soft_dof_pos_limit: 0.95
+  feet_clearance_target: 0.05
+  feet_clearance_std: 0.05
+  feet_clearance_tanh_mult: 2.0
+  close_feet_threshold: 0.2
+  scales:
+    tracking_lin_vel: 4.5
+    tracking_ang_vel: 2.5
+    alive: 0.15
+    penalty_lin_vel_z: -2.0
+    penalty_ang_vel_xy: -0.5
+    penalty_dof_vel: -0.001
+    penalty_dof_acc: -0.00000025
+    penalty_action_rate: -0.2
+    penalty_dof_pos_limits: -5.0
+    energy: -0.00002
+    pose: -0.5
+    penalty_orientation: -10.0
+    base_height: -10.0
+    gait: 0.5
+    feet_slide: -0.2
+    feet_clearance: 1.0
+    penalty_feet_ori: -2.0
+    penalty_close_feet_xy: -5.0
+    undesired_contacts: -1.0

@@ -1,0 +1,24 @@
+# Offline only: no task composition, policy loading, or experiment defaults.
+# All physical/statistical conventions below are chosen by the caller.
+run_dir: null
+output_dir: null
+linear_frame: null  # body_xy | yaw_frame_xy
+sample_phase: null  # query | completed
+start_s: null
+end_s: null
+relative_to: null  # run_start | payload (actual before-physics application event)
+payload_event_index: null  # Explicit zero-based event index for payload-relative windows.
+episode_id: null  # null reports each overlapping episode separately, never joins resets.
+curve_window_s: null  # Optional non-overlapping full windows; no padding/interpolation.
+reference_run_dir: null  # Optional common denominator; never inferred from the tested run.
+attitude_reference: null  # [roll, pitch] in the explicit unit below; shared XYZ Euler convention.
+attitude_unit: null  # rad | deg
+attitude_aggregation: null  # rms | mae
+action_source: null  # policy_action | environment_action | submitted_environment_action
+action_joint_reduction: null  # sum | mean of squared adjacent joint-action differences
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false

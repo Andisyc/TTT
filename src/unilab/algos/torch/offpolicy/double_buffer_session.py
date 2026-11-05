@@ -25,6 +25,7 @@ class DoubleBufferRunOptions:
     save_interval: int
     log_dir: str
     logger_type: str
+    start_iteration: int = 0
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,7 @@ class DoubleBufferTrainingSession:
         self.best_mean_reward = float("-inf")
         self.last_mean_reward = 0.0
         self.ckpt_path: str | None = None
-        self.iteration = 0
+        self.iteration = options.start_iteration
         self.reward_history: deque = deque(maxlen=100)
         self.latest_reward_components: dict[str, float] = {}
         self.last_buf_log = 0
@@ -73,6 +74,8 @@ class DoubleBufferTrainingSession:
         self._create_weight_sync()
         self._create_logger()
         self._create_coordination_resources()
+        if self.options.start_iteration > 0:
+            self._publish_normalizer()
         self._start_collector()
         self.dependencies.time_module.sleep(0.5)
         if self.runner._collector_process:
@@ -656,9 +659,11 @@ class DoubleBufferTrainingSession:
         self._fail_collector_died()
 
     def run(self) -> None:
+        if not 0 <= self.options.start_iteration < self.options.max_iterations:
+            raise ValueError("start_iteration must be within [0, max_iterations)")
         self.prepare()
         try:
-            for self.iteration in range(1, self.options.max_iterations + 1):
+            for self.iteration in range(self.options.start_iteration + 1, self.options.max_iterations + 1):
                 self._run_iteration()
             self._finalize_success()
         except self.dependencies.collector_died_error_cls:

@@ -280,17 +280,22 @@ demo:
 
 online_adaptation:
   enabled: false
-  mode: trajectory_base  # Full method; action_base / trajectory_lora select ablations 1 / 2.
+  mode: trajectory_base  # OAT; action_base / trajectory_lora are component variants; fada_ttt requires sigma=0.
   window_size: 10
   warmup_steps: 40
-  gamma: 0.05
-  sigma: 1.0e-4
+  gamma: 0.05  # Not used by fada_ttt; these defaults do not define a formal experiment protocol.
+  sigma: 1.0e-4  # Set explicitly to 0 for fada_ttt (no OAT parameter anchor).
   update_interval: 10
   learning_rate: 1.0e-4
   max_grad_norm: 1.0
   lora_rank: 8
   lora_alpha: 16.0
   lora_dropout: 0.05
+
+experiment_recording:
+  enabled: false
+  output_dir: null  # Explicit, new directory required; never overwrite another run.
+  chunk_steps: 256  # Storage buffer, not a formal experimental setting.
 
 video_recording:
   enabled: true

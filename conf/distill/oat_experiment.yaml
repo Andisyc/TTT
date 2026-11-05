@@ -1,0 +1,55 @@
+# One explicitly selected straight-line trial. No inherited Demo protocol.
+# ??? means the caller must supply a value; these are not formal defaults.
+group: ???  # fada_ttt | online_reference | action_snapshot | no_anchor | full_oat
+task_owner: ???  # Task/backend owner, e.g. g1_walk_flat/mujoco; no backend-only override.
+checkpoint_path: ???
+output_dir: ???  # New trial directory; raw/ and optional evaluation/ are created below it.
+seed: ???
+command: ???  # [vx, vy, yaw_rate], body-frame m/s, m/s, rad/s.
+duration_s: ???
+env_overrides: ???  # Explicit shared environment/initial-condition overrides; {} accepts the task settings.
+payload:
+  enabled: ???
+  body_name: null
+  added_mass_kg: null
+  attachment_pos_m: null
+  half_size_m: null
+  attach_time_s: null
+online:
+  window_size: ???
+  warmup_steps: ???
+  update_interval: ???
+  gamma: ???  # Shared OAT gain, recorded but not used by FADA-TTT.
+  sigma: ???  # Shared OAT anchor; overridden to zero ONLY for no_anchor/fada_ttt.
+  learning_rate: ???
+  max_grad_norm: ???  # Explicit null disables clipping.
+  lora_rank: ???
+  lora_alpha: ???
+  lora_dropout: ???
+# Optional official source control profile; validated by the existing checkpoint loader.
+official_profile_path: null
+device: null  # Runtime device selection only, not an experimental method setting.
+progress_interval_s: 1.0  # Wall-clock reporting only.
+chunk_steps: 256  # Storage buffering only.
+evaluation:
+  enabled: false
+  linear_frame: null
+  sample_phase: null
+  relative_to: null
+  start_s: null
+  end_s: null
+  payload_event_index: null
+  episode_id: null
+  curve_window_s: null
+  reference_run_dir: null
+  attitude_reference: null
+  attitude_unit: null
+  attitude_aggregation: null
+  action_source: null
+  action_joint_reduction: null
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false

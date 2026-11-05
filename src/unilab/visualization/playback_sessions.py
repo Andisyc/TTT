@@ -11,6 +11,7 @@ import torch
 
 if TYPE_CHECKING:
     from unilab.visualization.footprints import FootprintRecorder
+    from unilab.visualization.experiment_recording import ExperimentRecorder
 
 
 def _external_velocity_command_rows(
@@ -355,6 +356,8 @@ class FADAPlaybackSession(RslRlPlaybackSession):
         self.command_program = command_program
         self.footprint_recorder = footprint_recorder
         self.last_update_stats: dict[str, float | int] | None = None
+        self.experiment_recorder: ExperimentRecorder | None = None
+        self._recorded_policy_action: torch.Tensor | None = None
         super().__init__(policy=None, **kwargs)
         self.command_control_steps = np.zeros(self.num_envs, dtype=np.int64)
         if footprint_recorder is not None:
@@ -376,6 +379,22 @@ class FADAPlaybackSession(RslRlPlaybackSession):
         self.controller = controller
         self.policy = self._fada_policy
 
+    def bind_experiment_recorder(self, recorder: ExperimentRecorder) -> None:
+        """Share one recorder between viewer and video without changing inference."""
+        if self.experiment_recorder is not None:
+            raise RuntimeError("an experiment recorder is already bound")
+        if self.action_mode != "policy" or self.num_envs != 1:
+            raise ValueError("experiment recording requires single-env policy playback")
+        self.env.set_step_measurement_callback(recorder.on_step_completed)
+        self.experiment_recorder = recorder
+
+    def finish_experiment_recording(self, status: str, error: str | None = None) -> None:
+        if self.experiment_recorder is not None:
+            try:
+                self.experiment_recorder.close(status, error)
+            finally:
+                self.env.set_step_measurement_callback(None)
+
     def reset(self) -> Any:
         # B1: 环境 reset 与 FADA history reset 共享一个 lifecycle boundary.
         if self.controller is not None:
@@ -388,6 +407,8 @@ class FADAPlaybackSession(RslRlPlaybackSession):
             self.command_control_steps.fill(0)
         if self.footprint_recorder is not None:
             self.footprint_recorder.reset(self.env.get_foot_contact())
+        if self.experiment_recorder is not None:
+            self.experiment_recorder.on_reset("explicit")
         return result
 
     def step_once(self) -> Any:
@@ -399,8 +420,16 @@ class FADAPlaybackSession(RslRlPlaybackSession):
                 self.command_program.command_at_control_step(step)
                 for step in self.command_control_steps
             ]))
+        recorder = self.experiment_recorder
+        if recorder is not None:
+            recorder.begin_query(self.info["commands"])
+            self._recorded_policy_action = None
         actions = self._build_actions()
         self.actions = actions
+        if recorder is not None:
+            if self._recorded_policy_action is None:
+                raise RuntimeError("policy playback did not expose its source action")
+            recorder.submit_actions(self._recorded_policy_action, actions)
         self.obs, _reward, done, _info = self.wrapped_env.step(actions)
         if self.footprint_recorder is not None:
             done_rows = done.detach().cpu().numpy() if isinstance(done, torch.Tensor) else np.asarray(done)
@@ -421,10 +450,14 @@ class FADAPlaybackSession(RslRlPlaybackSession):
                 ),
                 done=done,
             )
+            if recorder is not None and self.last_update_stats is not None:
+                recorder.on_update(self.last_update_stats)
             if self.autoreset_enabled:
                 self.controller.reset(done)
                 if self.official_adapter is not None:
                     self.official_adapter.reset(done)
+        if recorder is not None and recorder.last_done and self.autoreset_enabled:
+            recorder.on_reset("autoreset")
         if self.command_program is not None:
             self.command_control_steps += 1
             if self.autoreset_enabled:
@@ -444,8 +477,14 @@ class FADAPlaybackSession(RslRlPlaybackSession):
         if self.official_adapter is not None:
             physical = self.official_adapter.observation()
             full_command = self.official_adapter.command(commands, self.info.get("gait_phase"))
-            return self.official_adapter.env_action(self.controller.act(physical, full_command))
-        return self.controller.act(observation, commands)
+            source_action = self.controller.act(physical, full_command)
+            if self.experiment_recorder is not None:
+                self._recorded_policy_action = source_action
+            return self.official_adapter.env_action(source_action)
+        source_action = self.controller.act(observation, commands)
+        if self.experiment_recorder is not None:
+            self._recorded_policy_action = source_action
+        return source_action
 
 
 class OffPolicyPlaybackSession:

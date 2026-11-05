@@ -349,6 +349,14 @@ def create_fada_playback_session(
 
     # B1: policy 模式先严格恢复 checkpoint, 避免加载失败后遗留已创建的环境资源.
     from omegaconf import OmegaConf
+    experiment_recording = None
+    experiment_node = OmegaConf.select(cfg, "experiment_recording", default=None)
+    if experiment_node is not None and bool(experiment_node.enabled):
+        from unilab.visualization.experiment_recording import ExperimentRecordingConfig
+
+        experiment_recording = ExperimentRecordingConfig(**OmegaConf.to_container(experiment_node, resolve=True))
+        if playback_cfg.action_mode != "policy" or int(playback_cfg.num_envs) != 1:
+            raise ValueError("experiment recording requires single-env policy playback")
 
     online_node = getattr(cfg, "online_adaptation", None)
     online_enabled = bool(getattr(online_node, "enabled", False))
@@ -447,6 +455,7 @@ def create_fada_playback_session(
     if env is None:
         raise RuntimeError("Playback env factory did not return an environment.")
     wrapped_env = None
+    recorder = None
     try:
         command_program = None
         demo = getattr(getattr(cfg, "demo", None), "figure_eight", None)
@@ -535,13 +544,23 @@ def create_fada_playback_session(
                 mode=online.mode,
                 **({"playback": controller} if official_profile is not None else {}),
             )
-            objective = "action_residual" if online.mode == "action_base" else "expert_trajectory_difference"
-            reference = "current_lora" if online.mode == "trajectory_lora" else "frozen_base"
+            if online.mode == "fada_ttt":
+                method_details = (
+                    "objective=inverse_dynamics, input=realized_future, "
+                    "target=saved_policy_action, reference=none, anchor=disabled, "
+                    "reduction=mean_batch_action, gamma=not_applicable, sigma=0, "
+                )
+            else:
+                objective = "action_residual" if online.mode == "action_base" else "expert_trajectory_difference"
+                reference = "current_lora" if online.mode == "trajectory_lora" else "frozen_base"
+                method_details = (
+                    f"objective={objective}, reference={reference}, "
+                    f"gamma={online.gamma}, sigma={online.sigma}, "
+                )
             log(
-                f"Online adaptation enabled: mode={online.mode}, "
-                f"objective={objective}, reference={reference}, "
+                f"Online adaptation enabled: mode={online.mode}, {method_details}"
                 f"prediction_horizon={architecture.prediction_horizon}, "
-                f"window_size={online.window_size}, gamma={online.gamma}, sigma={online.sigma}, "
+                f"window_size={online.window_size}, "
                 f"warmup_steps={online.warmup_steps}, update_interval={online.update_interval}, "
                 f"learning_rate={online.learning_rate}, "
                 f"max_grad_norm={online.max_grad_norm}, lora_rank={lora_config.rank}, "
@@ -561,10 +580,23 @@ def create_fada_playback_session(
             command_program=command_program,
             footprint_recorder=footprint_recorder,
         )
+        if experiment_recording is not None:
+            from unilab.visualization.experiment_recording import ExperimentRecorder, experiment_run_metadata
+
+            recorder = ExperimentRecorder(
+                env, experiment_recording,
+                experiment_run_metadata(cfg, env, checkpoint_path, root_dir, official_adapter),
+            )
+            session.bind_experiment_recorder(recorder)
+            log(f"Raw experiment records: {recorder.output_dir}")
         return session, policy_obs_mode, checkpoint_path
-    except Exception:
-        if wrapped_env is not None:
-            wrapped_env.close()
-        else:
-            env.close()
+    except BaseException as exc:
+        try:
+            if recorder is not None:
+                recorder.close("interrupted" if isinstance(exc, KeyboardInterrupt) else "failed", str(exc))
+        finally:
+            if wrapped_env is not None:
+                wrapped_env.close()
+            else:
+                env.close()
         raise

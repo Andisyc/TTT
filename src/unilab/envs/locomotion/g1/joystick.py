@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, cast
 
 import numpy as np
@@ -144,6 +145,17 @@ class G1WalkEnv(
     _reward_cfg: Any
 
     def __init__(self, cfg: G1WalkEnvCfg, num_envs=1, backend_type="mujoco"):
+        from unilab.envs.locomotion.g1.motion_quality_config import MotionQualityRewardConfig
+
+        motion_quality = isinstance(cfg.reward_config, MotionQualityRewardConfig)
+        self._motion_quality_provider = None
+        if motion_quality and (
+            backend_type != "mujoco"
+            or cfg.scene.fragment_files
+            or cfg.scene.terrain is not None
+            or epath.Path(cfg.scene.model_file).resolve() != (ASSETS_ROOT_PATH / "robots/g1/scene_flat.xml").resolve()
+        ):
+            raise ValueError("motion-quality rewards require the canonical MuJoCo flat scene")
         if cfg.reward_config is None:
             raise ValueError("reward_config must be provided via Hydra configuration")
         if cfg.reward_config.scales.get("feet_phase", 0.0) != 0.0 and cfg.reward_config.feet_phase_mode in {
@@ -205,7 +217,11 @@ class G1WalkEnv(
             mujoco_num_threads=cfg.mujoco_num_threads,
             motrix_max_iterations=cfg.motrix_max_iterations,
             post_step_forward_sensor=cfg.post_step_forward_sensor,
+<<<<<<< HEAD
             position_actuator_gains=cfg.control_config.position_actuator_gains,
+=======
+            **({"add_body_sensors": True, "reward_telemetry": True} if motion_quality else {}),
+>>>>>>> a160a5279959e1f54aa7ce2c8ad6ac14b21c3f61
         )
         super().__init__(cfg, backend, num_envs)
         self._enable_reward_log = True
@@ -248,6 +264,12 @@ class G1WalkEnv(
                 penalty_names=self._reward_cfg.penalty_curriculum_terms,
             )
 
+        if motion_quality:
+            from unilab.envs.locomotion.g1.motion_quality_reward import MotionQualityRewardProvider
+
+            self._motion_quality_provider = MotionQualityRewardProvider(
+                backend, cfg.reward_config, self.default_angles, cfg.ctrl_dt, cfg.asset.base_name
+            )
         self._init_reward_functions()
         self._fada_base_kp: np.ndarray | None = None
         self._fada_base_kd: np.ndarray | None = None
@@ -302,6 +324,26 @@ class G1WalkEnv(
         self._fada_dr_provider = dr_provider
         self._init_domain_randomization(dr_provider)
 
+    def get_motion_quality_deployment_profile(self) -> dict[str, Any]:
+        """Capture nominal controls and materialized config, never randomized gains."""
+        identity = self.get_fada_privileged_checkpoint_identity()
+        return {
+            "observation_layout": [list(item) for item in self.get_symmetry_obs_layouts()["obs"]],
+            "body_names": list(identity.body_names),
+            "actuated_joint_names": list(identity.actuated_joint_names),
+            "privileged_field_slices": [list(item) for item in identity.field_slices],
+            "asset_sha256": identity.asset_sha256,
+            "ctrl_dt": float(self.cfg.ctrl_dt),
+            "sim_dt": float(self.cfg.sim_dt),
+            "action_scale": float(self.cfg.control_config.action_scale),
+            "default_joint_pos": self.default_angles.tolist(),
+            "kp": self._fada_base_kp.tolist(),
+            "kd": self._fada_base_kd.tolist(),
+            "environment_config": json.loads(json.dumps(
+                asdict(self.cfg), default=lambda value: value.tolist(),
+            )),
+        }
+
     def init_state(self) -> NpEnvState:
         state = super().init_state()
         self._runtime_payload.init_info(state.info)
@@ -317,6 +359,8 @@ class G1WalkEnv(
             self._runtime_payload.restore_before_reset(self._state.info, env_indices)
         obs, reset_info = super().reset(env_indices)
         reset_info.update(self._runtime_payload.reset_info_updates(env_indices))
+        if self._motion_quality_provider is not None:
+            reset_info.update(self._motion_quality_provider.reset_info(self._backend.get_dof_vel()[env_indices]))
         return obs, reset_info
 
 

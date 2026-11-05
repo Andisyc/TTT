@@ -490,7 +490,7 @@ def test_failed_online_construction_releases_environment(policy, checkpoint_file
     assert env.closed
 
 
-@pytest.mark.parametrize("failure", ["multiple_envs", "zero_actions", "old_config", "mode"])
+@pytest.mark.parametrize("failure", ["multiple_envs", "zero_actions", "old_config", "mode", "fada_anchor"])
 def test_invalid_online_request_fails_before_environment_creation(policy, checkpoint_file, failure):
     env = _FakeEnv(np.random.default_rng(5))
     wrapped = _FakeWrappedEnv(env, env._rng)
@@ -502,13 +502,15 @@ def test_invalid_online_request_fails_before_environment_creation(policy, checkp
         object.__setattr__(playback, "action_mode", "zero")
     elif failure == "old_config":
         online["lambda_forget"] = 0.9
+    elif failure == "fada_anchor":
+        online["mode"] = "fada_ttt"
     else:
         online["mode"] = "invalid"
     deps = _deps(policy, env, wrapped, checkpoint_file)
     def forbidden_env(*args, **kwargs):
         pytest.fail("invalid online request must not create an environment")
     deps["create_env"] = forbidden_env
-    if failure == "mode":
+    if failure in ("mode", "fada_anchor"):
         deps["load_fada_policy"] = forbidden_env
     with pytest.raises((ValueError, TypeError)):
         create_fada_playback_session(
@@ -520,12 +522,14 @@ def test_invalid_online_request_fails_before_environment_creation(policy, checkp
 def _mode_session(policy, mode, checkpoint_file=None):
     env = _FakeEnv(np.random.default_rng(6))
     wrapped = _FakeWrappedEnv(env, env._rng)
+    sigma = 0.0 if mode == "fada_ttt" else 1e-4
     if checkpoint_file is not None:
         from hydra import compose, initialize_config_dir
 
         config_dir = Path(__file__).resolve().parents[2] / "conf" / "distill"
         overrides = ["task=g1_walk_flat/mujoco"] + [
-            f"online_adaptation.{key}={str(value).lower()}" for key, value in _ONLINE.items()
+            f"online_adaptation.{key}={str(value).lower()}"
+            for key, value in dict(_ONLINE, sigma=sigma).items()
         ]
         overrides.append(f"online_adaptation.mode={mode}")
         with initialize_config_dir(version_base="1.3", config_dir=str(config_dir)):
@@ -539,7 +543,7 @@ def _mode_session(policy, mode, checkpoint_file=None):
     controller = OnlineAdaptationController(
         policy, FADALoRAConfig(rank=2, alpha=4.0, dropout=0.0),
         window_size=3, warmup_steps=0, update_interval=2,
-        gamma=0.05, sigma=1e-4, lr=1e-3, mode=mode,
+        gamma=0.05, sigma=sigma, lr=1e-3, mode=mode,
     )
     session = FADAPlaybackSession(
         env=env, wrapped_env=wrapped, device="cpu", action_mode="policy",
@@ -549,7 +553,7 @@ def _mode_session(policy, mode, checkpoint_file=None):
     return session
 
 
-@pytest.mark.parametrize("mode", ["trajectory_base", "action_base", "trajectory_lora"])
+@pytest.mark.parametrize("mode", ["trajectory_base", "action_base", "trajectory_lora", "fada_ttt"])
 @pytest.mark.parametrize("via_factory", [False, True])
 def test_controller_mode_updates_use_preupdate_targets_and_retain_learning(
     policy, monkeypatch, mode, checkpoint_file, via_factory,
@@ -558,7 +562,11 @@ def test_controller_mode_updates_use_preupdate_targets_and_retain_learning(
 
     session = _mode_session(policy, mode, checkpoint_file if via_factory else None)
     controller = session.controller
-    base_before = {name: value.clone() for name, value in controller.base_idm.state_dict().items()}
+    base_before = {} if controller.base_idm is None else {
+        name: value.clone() for name, value in controller.base_idm.state_dict().items()
+    }
+    if mode == "fada_ttt":
+        assert controller.base_idm is None
     planner_before = {name: value.clone() for name, value in policy.planner.state_dict().items()}
     # Separate the reference candidates before checking routing; zero LoRA
     # initialization would otherwise hide an incorrect reference selection.
@@ -576,12 +584,15 @@ def test_controller_mode_updates_use_preupdate_targets_and_retain_learning(
             for sample in samples:
                 snapshot = sample.trajectory.snapshot
                 inputs = (snapshot.observation_history, snapshot.action_history)
-                realized = reference(*inputs, sample.trajectory.realized_future)[:, 0]
-                nominal = (
-                    snapshot.action_snapshot if mode == "action_base"
-                    else reference(*inputs, snapshot.nominal_future)[:, 0]
-                )
-                target = snapshot.action_snapshot + 0.05 * (nominal - realized)
+                if mode == "fada_ttt":
+                    target = snapshot.action_snapshot
+                else:
+                    realized = reference(*inputs, sample.trajectory.realized_future)[:, 0]
+                    nominal = (
+                        snapshot.action_snapshot if mode == "action_base"
+                        else reference(*inputs, snapshot.nominal_future)[:, 0]
+                    )
+                    target = snapshot.action_snapshot + 0.05 * (nominal - realized)
                 torch.testing.assert_close(sample.target_action, target, rtol=1e-6, atol=1e-7)
                 assert not sample.target_action.requires_grad and sample.target_action.grad_fn is None
                 expected_targets.append(target.clone())
@@ -589,14 +600,21 @@ def test_controller_mode_updates_use_preupdate_targets_and_retain_learning(
             predictions = policy.idm(
                 torch.cat([snapshot.observation_history for snapshot in snapshots]),
                 torch.cat([snapshot.action_history for snapshot in snapshots]),
-                torch.cat([snapshot.nominal_future for snapshot in snapshots]),
+                torch.cat([
+                    sample.trajectory.realized_future if mode == "fada_ttt"
+                    else sample.trajectory.snapshot.nominal_future for sample in samples
+                ]),
             )[:, 0]
-            expected_regression = 0.5 * (
-                predictions - torch.cat(expected_targets)
-            ).square().sum(dim=-1).mean()
+            expected_regression = (
+                torch.nn.functional.mse_loss(predictions, torch.cat(expected_targets))
+                if mode == "fada_ttt" else
+                0.5 * (predictions - torch.cat(expected_targets)).square().sum(dim=-1).mean()
+            )
         before = tuple(parameter.detach().clone() for parameter in fada_adapter_parameters(policy))
         stats = real_update(samples)
         assert stats["regression_loss"] == pytest.approx(float(expected_regression), rel=1e-6, abs=1e-8)
+        if mode == "fada_ttt":
+            assert stats["anchor_loss"] == 0.0
         assert any(not torch.equal(old, new) for old, new in zip(before, fada_adapter_parameters(policy)))
         for sample, target in zip(samples, fixed_targets):
             torch.testing.assert_close(sample.target_action, target, rtol=0, atol=0)
@@ -607,11 +625,13 @@ def test_controller_mode_updates_use_preupdate_targets_and_retain_learning(
     for _ in range(HORIZON + 6):
         session.step_once()
     assert len(completed) == 2
-    for name, value in controller.base_idm.state_dict().items():
-        torch.testing.assert_close(value, base_before[name], rtol=0, atol=0)
+    if controller.base_idm is not None:
+        for name, value in controller.base_idm.state_dict().items():
+            torch.testing.assert_close(value, base_before[name], rtol=0, atol=0)
     for name, value in policy.planner.state_dict().items():
         torch.testing.assert_close(value, planner_before[name], rtol=0, atol=0)
-    assert all(parameter.grad is None for parameter in controller.base_idm.parameters())
+    if controller.base_idm is not None:
+        assert all(parameter.grad is None for parameter in controller.base_idm.parameters())
     assert all(parameter.grad is None for parameter in policy.planner.parameters())
     learned = {name: value.clone() for name, value in policy.state_dict().items()}
     optimizer = controller.updater.optimizer
@@ -632,7 +652,7 @@ def test_controller_mode_updates_use_preupdate_targets_and_retain_learning(
         assert session.last_update_stats is None
 
 
-@pytest.mark.parametrize("mode", ["trajectory_base", "action_base", "trajectory_lora"])
+@pytest.mark.parametrize("mode", ["trajectory_base", "action_base", "trajectory_lora", "fada_ttt"])
 def test_controller_mode_failed_labels_preserve_window_and_parameters(policy, mode):
     session = _mode_session(policy, mode)
     for _ in range(HORIZON + 1):
@@ -714,14 +734,19 @@ def official_controller_inputs():
     return policy, playback, physical, expected_compact
 
 
-@pytest.mark.parametrize("mode", ["trajectory_base", "action_base", "trajectory_lora"])
+@pytest.mark.parametrize("mode", ["trajectory_base", "action_base", "trajectory_lora", "fada_ttt"])
 def test_official_controller_modes_complete_two_phase_aligned_updates(official_controller_inputs, monkeypatch, mode):
     policy, playback, physical, expected_compact = official_controller_inputs
     controller = OnlineAdaptationController(
         policy, FADALoRAConfig(rank=2, alpha=4.0, dropout=0.0), playback=playback,
         window_size=3, warmup_steps=0, update_interval=2, gamma=0.05, lr=1e-3, mode=mode,
+        sigma=0.0 if mode == "fada_ttt" else 1e-4,
     )
-    base_before = {name: value.clone() for name, value in controller.base_idm.state_dict().items()}
+    base_before = {} if controller.base_idm is None else {
+        name: value.clone() for name, value in controller.base_idm.state_dict().items()
+    }
+    if mode == "fada_ttt":
+        assert controller.base_idm is None
     planner_before = {name: value.clone() for name, value in policy.planner.state_dict().items()}
     with torch.no_grad():
         for parameter in fada_adapter_parameters(policy):
@@ -761,13 +786,18 @@ def test_official_controller_modes_complete_two_phase_aligned_updates(official_c
         saved_action = torch.cat([snapshot.action_snapshot for snapshot in snapshots])
         reference = policy.idm if mode == "trajectory_lora" else controller.base_idm
         with torch.no_grad():
-            predicted = policy.idm(observations, history_actions, command, nominal, history_valid_mask=mask)[:, 0]
-            realized_action = reference(observations, history_actions, command, realized, history_valid_mask=mask)[:, 0]
-            nominal_action = saved_action if mode == "action_base" else reference(
-                observations, history_actions, command, nominal, history_valid_mask=mask,
-            )[:, 0]
-            expected_target = saved_action + 0.05 * (nominal_action - realized_action)
-            expected_regression = 0.5 * (predicted - expected_target).square().sum(dim=-1).mean()
+            prediction_future = realized if mode == "fada_ttt" else nominal
+            predicted = policy.idm(observations, history_actions, command, prediction_future, history_valid_mask=mask)[:, 0]
+            if mode == "fada_ttt":
+                expected_target = saved_action
+                expected_regression = torch.nn.functional.mse_loss(predicted, expected_target)
+            else:
+                realized_action = reference(observations, history_actions, command, realized, history_valid_mask=mask)[:, 0]
+                nominal_action = saved_action if mode == "action_base" else reference(
+                    observations, history_actions, command, nominal, history_valid_mask=mask,
+                )[:, 0]
+                expected_target = saved_action + 0.05 * (nominal_action - realized_action)
+                expected_regression = 0.5 * (predicted - expected_target).square().sum(dim=-1).mean()
         target = torch.cat([sample.target_action for sample in samples])
         torch.testing.assert_close(target, expected_target, rtol=1e-6, atol=1e-7)
         assert all(not sample.target_action.requires_grad and sample.target_action.grad_fn is None for sample in samples)
@@ -775,6 +805,8 @@ def test_official_controller_modes_complete_two_phase_aligned_updates(official_c
         before = tuple(parameter.detach().clone() for parameter in fada_adapter_parameters(policy))
         stats = real_update(samples)
         assert stats["regression_loss"] == pytest.approx(float(expected_regression), rel=1e-6, abs=1e-8)
+        if mode == "fada_ttt":
+            assert stats["anchor_loss"] == 0.0
         assert any(not torch.equal(old, new) for old, new in zip(before, fada_adapter_parameters(policy)))
         for sample, saved in zip(samples, fixed):
             torch.testing.assert_close(sample.target_action, saved, rtol=0, atol=0)
@@ -795,9 +827,70 @@ def test_official_controller_modes_complete_two_phase_aligned_updates(official_c
         assert (stats is not None) == (step in (3, 7))
     assert len(updates) == 2
     assert any(clipped)
-    for name, value in controller.base_idm.state_dict().items():
-        torch.testing.assert_close(value, base_before[name], rtol=0, atol=0)
+    if controller.base_idm is not None:
+        for name, value in controller.base_idm.state_dict().items():
+            torch.testing.assert_close(value, base_before[name], rtol=0, atol=0)
     for name, value in policy.planner.state_dict().items():
         torch.testing.assert_close(value, planner_before[name], rtol=0, atol=0)
-    assert all(parameter.grad is None for parameter in controller.base_idm.parameters())
+    if controller.base_idm is not None:
+        assert all(parameter.grad is None for parameter in controller.base_idm.parameters())
     assert all(parameter.grad is None for parameter in policy.planner.parameters())
+
+
+@pytest.mark.parametrize("family", ["legacy", "official"])
+def test_fada_ttt_learns_realized_future_with_original_mse(policy, official_controller_inputs, family):
+    from dataclasses import replace
+
+    from unilab.algos.torch.distill.fada.online_updater import build_fada_ttt_samples
+    from unilab.algos.torch.distill.fada.runtime_policy import invoke_fada_idm
+
+    if family == "official":
+        policy, playback, physical, _ = official_controller_inputs
+        observation = physical(0)
+        command = torch.tensor([[0.3, 0.0, 0.2, 0.0, 0.0, 1.0, -1.0]])
+    else:
+        playback = None
+        observation = {"actor": torch.zeros(1, 98)}
+        command = torch.tensor([[0.3, 0.0, 0.2]])
+    controller = OnlineAdaptationController(
+        policy, FADALoRAConfig(rank=2, alpha=4.0, dropout=0.0), playback=playback,
+        sigma=0.0, gamma=123.0, mode="fada_ttt",
+    )
+    _, snapshot = controller.playback.act_projected_with_snapshot(
+        controller.project_observation(observation), command,
+    )
+    realized = snapshot.nominal_future + torch.linspace(0.1, 0.9, controller.runtime_spec.obs_dim)
+    pair = FADATrajectoryPair(snapshot, realized, 0, 0)
+    samples = build_fada_ttt_samples((pair,))
+    torch.testing.assert_close(samples[0].target_action, snapshot.action_snapshot, rtol=0, atol=0)
+    assert not samples[0].target_action.requires_grad
+    with torch.no_grad():
+        predicted = invoke_fada_idm(
+            policy.idm, controller.runtime_spec, snapshot.observation_history,
+            snapshot.action_history, snapshot.command, pair.realized_future,
+            history_valid_mask=snapshot.history_valid_mask,
+        )[:, 0]
+        expected = torch.nn.functional.mse_loss(predicted, snapshot.action_snapshot)
+    loss, regression, anchor = controller.updater.compute_loss(samples)
+    torch.testing.assert_close(regression, expected, rtol=0, atol=0)
+    torch.testing.assert_close(loss, expected, rtol=0, atol=0)
+    assert anchor.item() == 0.0
+    changed_nominal = replace(snapshot, nominal_future=snapshot.nominal_future + 100.0)
+    nominal_samples = build_fada_ttt_samples((replace(pair, snapshot=changed_nominal),))
+    nominal_loss, _, _ = controller.updater.compute_loss(nominal_samples)
+    torch.testing.assert_close(nominal_loss, loss, rtol=0, atol=0)
+    changed_realized = replace(pair, realized_future=-pair.realized_future.flip(-1) * 2.0)
+    realized_loss, _, _ = controller.updater.compute_loss(build_fada_ttt_samples((changed_realized,)))
+    assert not torch.isclose(realized_loss, loss, rtol=1e-6, atol=1e-8)
+    changed_action = replace(snapshot, action_snapshot=snapshot.action_snapshot + 1.0)
+    action_loss, _, _ = controller.updater.compute_loss(
+        build_fada_ttt_samples((replace(pair, snapshot=changed_action),)),
+    )
+    torch.testing.assert_close(
+        action_loss, torch.nn.functional.mse_loss(predicted, changed_action.action_snapshot),
+        rtol=0, atol=0,
+    )
+    loss.backward()
+    adapters = tuple(fada_adapter_parameters(policy))
+    assert any(parameter.grad is not None and bool(parameter.grad.abs().sum() > 0) for parameter in adapters)
+    assert all(parameter.grad is None for parameter in policy.parameters() if not parameter.requires_grad)

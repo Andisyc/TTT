@@ -33,6 +33,15 @@ class BackendAdapter:
         """Build env_cfg_override from the resolved reward + env sections."""
         env_cfg_override = extract_reward_config(self.cfg)
         env_cfg_override.update(self._to_plain_dict(getattr(self.cfg, "env", None)))
+        if OmegaConf.select(self.cfg, "oracle.reward_profile") is not None:
+            from unilab.envs.locomotion.g1.motion_quality_config import build_motion_quality_reward_config
+            from unilab.training.oracle.config import validate_oracle_config
+
+            validate_oracle_config(self.cfg)
+            env_cfg_override["reward_config"] = build_motion_quality_reward_config(
+                env_cfg_override["reward_config"]
+            )
+            env_cfg_override["post_step_forward_sensor"] = True
 
         return env_cfg_override
 

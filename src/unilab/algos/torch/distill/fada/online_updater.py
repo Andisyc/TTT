@@ -131,8 +131,17 @@ def build_expert_samples(
     )
 
 
+def build_fada_ttt_samples(
+    trajectories: Sequence[FADATrajectoryPair],
+) -> tuple[FADAOnlineSample, ...]:
+    """Supervise the saved policy command, never a mapped env action or torque."""
+    if not trajectories:
+        raise ValueError("FADA-TTT requires a non-empty trajectory window")
+    return tuple(FADAOnlineSample(pair, pair.snapshot.action_snapshot) for pair in trajectories)
+
+
 class OnlineSnapshotUpdater:
-    """Regress fixed snapshot labels with an explicit deployment-parameter anchor.
+    """Update LoRA using OAT snapshot targets or FADA-TTT inverse dynamics MSE.
 
     The collector owns the window. Each call consumes it without retaining,
     draining, or rebuilding samples; only IDM LoRA parameters are optimized.
@@ -147,7 +156,13 @@ class OnlineSnapshotUpdater:
         lr: float = 1e-4,
         max_grad_norm: float | None = 1.0,
         runtime_spec: FADARuntimeSpec | None = None,
+        objective: Literal["snapshot_target", "inverse_dynamics"] = "snapshot_target",
     ) -> None:
+        if objective not in ("snapshot_target", "inverse_dynamics"):
+            raise ValueError(f"unsupported online learning objective: {objective!r}")
+        if objective == "inverse_dynamics" and sigma != 0.0:
+            raise ValueError("FADA-TTT requires sigma=0; OAT parameter anchoring is not part of its objective")
+        self.objective = objective
         if not math.isfinite(sigma) or sigma < 0.0:
             raise ValueError("sigma must be finite and non-negative")
         if not math.isfinite(lr) or lr <= 0.0:
@@ -177,7 +192,7 @@ class OnlineSnapshotUpdater:
     def compute_loss(
         self, samples: Sequence[FADAOnlineSample]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return total, per-sample squared-norm regression, and L2 anchor losses."""
+        """Return total, first-action regression, and OAT-only anchor losses."""
         if not samples:
             raise ValueError("snapshot regression requires a non-empty sample window")
         spec = self.runtime_spec
@@ -189,7 +204,11 @@ class OnlineSnapshotUpdater:
             [sample.trajectory.snapshot.action_history for sample in samples], dim=0
         ).to(reference)
         futures = torch.cat(
-            [sample.trajectory.snapshot.nominal_future for sample in samples], dim=0
+            [
+                sample.trajectory.realized_future if self.objective == "inverse_dynamics"
+                else sample.trajectory.snapshot.nominal_future
+                for sample in samples
+            ], dim=0
         ).to(reference)
         targets = torch.cat(
             [sample.target_action for sample in samples], dim=0
@@ -219,11 +238,16 @@ class OnlineSnapshotUpdater:
                 )[:, 0]
             if predicted.shape != targets.shape:
                 raise ValueError("snapshot targets must match first-action predictions")
-            regression = 0.5 * (predicted - targets).square().sum(dim=-1).mean()
+            regression = (
+                torch.nn.functional.mse_loss(predicted, targets)
+                if self.objective == "inverse_dynamics"
+                else 0.5 * (predicted - targets).square().sum(dim=-1).mean()
+            )
             anchor = reference.new_zeros(())
-            for name, parameter in self._adapters.items():
-                anchor = anchor + (parameter - self.theta_base[name]).square().sum()
-            anchor = (0.5 * self.sigma) * anchor
+            if self.objective == "snapshot_target":
+                for name, parameter in self._adapters.items():
+                    anchor = anchor + (parameter - self.theta_base[name]).square().sum()
+                anchor = (0.5 * self.sigma) * anchor
             return regression + anchor, regression, anchor
         finally:
             for module, training in modes:

@@ -81,6 +81,7 @@ def _prepare_variant_model_xml(
     *,
     add_body_sensors: bool,
     base_name: str | None,
+    reward_telemetry: bool = False,
 ) -> tuple[str, list[str]]:
     from unilab.base.backend.mujoco.xml import (
         create_discardvisual_xml,
@@ -95,6 +96,11 @@ def _prepare_variant_model_xml(
             baselink_name=base_name,
         )
         tmp_paths.append(model_path)
+    if reward_telemetry:
+        from .reward_telemetry import inject_reward_telemetry
+
+        model_path = inject_reward_telemetry(model_path)
+        tmp_paths.append(model_path)
     return model_path, tmp_paths
 
 
@@ -107,11 +113,13 @@ def _compile_model_variant_chunk_to_mjb(
     iterations: int | None,
     position_actuator_gains: dict | None,
     variants: tuple[ModelVariantSpec, ...],
+    reward_telemetry: bool = False,
 ) -> tuple[str, ...]:
     model_path, tmp_paths = _prepare_variant_model_xml(
         model_file,
         add_body_sensors=add_body_sensors,
         base_name=base_name,
+        reward_telemetry=reward_telemetry,
     )
     output_dir = tempfile.mkdtemp(prefix="unilab-mj-variant-")
     try:
@@ -297,6 +305,7 @@ class MuJoCoBackend(SimBackend):
         push_body_name: Optional[str] = None,
         post_step_forward_sensor: bool = False,
         num_threads: int | None = None,
+        reward_telemetry: bool = False,
     ):
         resolved_num_threads = (
             min(num_envs, cpu_count() * 2) if num_threads is None else int(num_threads)
@@ -327,6 +336,7 @@ class MuJoCoBackend(SimBackend):
             None if position_actuator_gains is None else dict(position_actuator_gains)
         )
         self._pre_step_control_fn = None
+        self._reward_telemetry = bool(reward_telemetry)
         self._model = self._load_base_model()
         self._base_body_id = (
             mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, base_name)
@@ -434,6 +444,15 @@ class MuJoCoBackend(SimBackend):
             self._tracked_quat_b_all = _get_sensor_view("track_quat_b", 4)
             self._tracked_linvel_b_all = _get_sensor_view("track_linvel_b", 3)
             self._tracked_angvel_b_all = _get_sensor_view("track_angvel_b", 3)
+        if self._reward_telemetry:
+            start = self._sensor_indices["mq_contact_1"][0]
+            count = self._model.nbody - 1
+            self._reward_contacts = self._sensor_data[:, start:start + 3 * count].reshape(num_envs, count, 3)
+            start = self._sensor_indices["mq_torque_0"][0]
+            self._reward_torques = self._sensor_data[:, start:start + self._model.nu]
+            start = self._sensor_indices["mq_site_vel_0"][0]
+            self._reward_site_vel = self._sensor_data[:, start:start + 3 * self._model.nsite].reshape(num_envs, self._model.nsite, 3)
+
 
     def get_scene_artifacts(self) -> BackendSceneArtifacts:
         """Return source and materialized MuJoCo scene paths."""
@@ -482,6 +501,11 @@ class MuJoCoBackend(SimBackend):
         else:
             tracked_body_ids = []
             valid_bnames = []
+        if self._reward_telemetry:
+            from .reward_telemetry import inject_reward_telemetry
+
+            model_path = inject_reward_telemetry(model_path)
+            tmp_paths.append(model_path)
         return model_path, tmp_paths, tracked_body_ids, valid_bnames
 
     def _configure_model(self, model: mujoco.MjModel) -> None:
@@ -551,6 +575,7 @@ class MuJoCoBackend(SimBackend):
                 model_file=self._model_file,
                 add_body_sensors=self.add_body_sensors,
                 base_name=self._base_name,
+                reward_telemetry=self._reward_telemetry,
                 sim_dt=self._sim_dt,
                 iterations=self._iterations,
                 position_actuator_gains=self._position_actuator_gains,
@@ -574,6 +599,7 @@ class MuJoCoBackend(SimBackend):
                         model_file=self._model_file,
                         add_body_sensors=self.add_body_sensors,
                         base_name=self._base_name,
+                        reward_telemetry=self._reward_telemetry,
                         sim_dt=self._sim_dt,
                         iterations=self._iterations,
                         position_actuator_gains=self._position_actuator_gains,
@@ -588,6 +614,7 @@ class MuJoCoBackend(SimBackend):
                     model_file=self._model_file,
                     add_body_sensors=self.add_body_sensors,
                     base_name=self._base_name,
+                    reward_telemetry=self._reward_telemetry,
                     sim_dt=self._sim_dt,
                     iterations=self._iterations,
                     position_actuator_gains=self._position_actuator_gains,
@@ -1386,6 +1413,23 @@ class MuJoCoBackend(SimBackend):
 
     def get_dof_vel(self) -> np.ndarray:
         return self._dof_vel_view
+
+    def get_actuator_forces(self) -> np.ndarray:
+        if not self._reward_telemetry:
+            raise NotImplementedError("actuator force telemetry was not enabled at initialization")
+        return self._reward_torques
+
+    def get_body_contact_force_norms(self, body_ids: np.ndarray) -> np.ndarray:
+        if not self._reward_telemetry:
+            raise NotImplementedError("contact force telemetry was not enabled at initialization")
+        if np.any(body_ids <= 0) or np.any(body_ids >= self._model.nbody):
+            raise ValueError("contact telemetry requires non-world body ids")
+        return np.linalg.norm(self._reward_contacts[:, body_ids - 1], axis=2)
+
+    def get_site_lin_vel_w(self, site_ids: np.ndarray) -> np.ndarray:
+        if not self._reward_telemetry:
+            raise NotImplementedError("site velocity telemetry was not enabled at initialization")
+        return self._reward_site_vel[:, site_ids]
 
     # ------------------------------------------------------------------ #
     # Body kinematics — world frame                                      #

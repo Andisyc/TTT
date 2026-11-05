@@ -107,6 +107,10 @@ def resolve_play_actor_spec(
 
 def play_offpolicy(algo_name: str, cfg: DictConfig) -> str | None:
     """Play pipeline for off-policy algorithms."""
+    if OmegaConf.select(cfg, "oracle.identity") == "motion_quality_oracle_v1":
+        from unilab.training.oracle.playback import play_oracle
+
+        return play_oracle(cfg)
     import numpy as np
     import torch
 

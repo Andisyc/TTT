@@ -44,6 +44,7 @@ class DoubleBufferOffPolicyRunner(OffPolicyRunner):
         replay_prefetch_mode: str = "one_tick",
         verbose_metrics: bool = False,
         checkpoint_saver: CheckpointSaver | None = None,
+        start_iteration: int = 0,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -54,6 +55,7 @@ class DoubleBufferOffPolicyRunner(OffPolicyRunner):
         self.replay_prefetch_mode = replay_prefetch_mode
         self.verbose_metrics = bool(verbose_metrics)
         self.checkpoint_saver = checkpoint_saver
+        self.start_iteration = start_iteration
         self.replay_pack_layout = "packed"
         self.replay_pack_executor = "collector_thread"
         self.replay_h2d_submitter = "auto"
@@ -163,7 +165,9 @@ class DoubleBufferOffPolicyRunner(OffPolicyRunner):
         log_dir: str = "logs",
         logger_type: str = "tensorboard",
     ) -> None:
-        options = DoubleBufferRunOptions(max_iterations, save_interval, log_dir, logger_type)
+        options = DoubleBufferRunOptions(
+            max_iterations, save_interval, log_dir, logger_type, self.start_iteration,
+        )
         dependencies = DoubleBufferSessionDependencies(
             replay_buffer_cls=ReplayBuffer,
             replay_pipeline_cls=CPUPinnedDoubleBufferReplayPipeline,

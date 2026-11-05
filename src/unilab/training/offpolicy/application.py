@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 ROOT_DIR = Path(__file__).parents[4]
 
@@ -89,6 +89,10 @@ def run_offpolicy(cfg: DictConfig) -> None:
             try:
                 runner = build_runner(algo_name, cfg)
                 apply_configured_actor_warm_start(algo_name, cfg, runner)
+                if OmegaConf.select(cfg, "oracle.identity") == "motion_quality_oracle_v1":
+                    from unilab.training.oracle.checkpoint import resume_oracle_training
+
+                    resume_oracle_training(runner, cfg, log_dir)
                 runner.learn(
                     max_iterations=cfg.algo.max_iterations,
                     save_interval=cfg.algo.save_interval,

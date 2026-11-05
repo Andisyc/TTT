@@ -13,7 +13,9 @@ import torch
 from unilab.algos.torch.distill.fada.adaptation import FADALoRAConfig
 from unilab.algos.torch.distill.fada.model import FADAPlannerIDMPolicy
 from unilab.algos.torch.distill.fada.online_collector import OnlineTrajectoryCollector
-from unilab.algos.torch.distill.fada.online_updater import OnlineSnapshotUpdater, build_expert_samples
+from unilab.algos.torch.distill.fada.online_updater import (
+    OnlineSnapshotUpdater, build_expert_samples, build_fada_ttt_samples,
+)
 from unilab.algos.torch.distill.fada.playback import FADAPlaybackController
 from unilab.algos.torch.distill.fada.official_model import PlannerIDMPolicy
 from unilab.algos.torch.distill.fada.runtime_policy import get_fada_runtime_spec
@@ -32,11 +34,13 @@ class FADAOnlineAdaptationConfig:
     lora_rank: int = 8
     lora_alpha: float = 16.0
     lora_dropout: float = 0.05
-    mode: Literal["trajectory_base", "action_base", "trajectory_lora"] = "trajectory_base"
+    mode: Literal["trajectory_base", "action_base", "trajectory_lora", "fada_ttt"] = "trajectory_base"
 
     def __post_init__(self) -> None:
-        if self.mode not in ("trajectory_base", "action_base", "trajectory_lora"):
+        if self.mode not in ("trajectory_base", "action_base", "trajectory_lora", "fada_ttt"):
             raise ValueError(f"unsupported online target mode: {self.mode!r}")
+        if self.mode == "fada_ttt" and self.sigma != 0.0:
+            raise ValueError("FADA-TTT requires sigma=0; OAT parameter anchoring is not part of its objective")
         for name in ("window_size", "update_interval"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
@@ -77,7 +81,7 @@ class OnlineAdaptationController:
         max_grad_norm: float | None = 1.0,
         device: str | torch.device = "cpu",
         playback: Any | None = None,
-        mode: Literal["trajectory_base", "action_base", "trajectory_lora"] = "trajectory_base",
+        mode: Literal["trajectory_base", "action_base", "trajectory_lora", "fada_ttt"] = "trajectory_base",
     ) -> None:
         FADAOnlineAdaptationConfig(
             enabled=True, window_size=window_size, gamma=gamma, sigma=sigma,
@@ -93,10 +97,11 @@ class OnlineAdaptationController:
         if playback is not None and playback.policy is not policy:
             raise ValueError("online adaptation and playback must share the same policy")
         self.collector = OnlineTrajectoryCollector(self.runtime_spec, window_size=window_size)
-        self.base_idm = copy.deepcopy(policy.idm).eval().requires_grad_(False)
+        self.base_idm = None if mode == "fada_ttt" else copy.deepcopy(policy.idm).eval().requires_grad_(False)
         self.updater = OnlineSnapshotUpdater(
             policy, lora_config, sigma=sigma, lr=lr, max_grad_norm=max_grad_norm,
             runtime_spec=self.runtime_spec,
+            objective="inverse_dynamics" if mode == "fada_ttt" else "snapshot_target",
         )
         self.policy = self.updater.policy
         self.policy.eval()
@@ -141,11 +146,14 @@ class OnlineAdaptationController:
             and self._step_count % self.update_interval == 0
             and self.collector.ready
         ):
-            reference_idm = self.policy.idm if self.mode == "trajectory_lora" else self.base_idm
-            samples = build_expert_samples(
-                reference_idm, self.collector.get_window(), gamma=self.gamma,
-                runtime_spec=self.runtime_spec, mode=self.mode,
-            )
+            if self.mode == "fada_ttt":
+                samples = build_fada_ttt_samples(self.collector.get_window())
+            else:
+                reference_idm = self.policy.idm if self.mode == "trajectory_lora" else self.base_idm
+                samples = build_expert_samples(
+                    reference_idm, self.collector.get_window(), gamma=self.gamma,
+                    runtime_spec=self.runtime_spec, mode=self.mode,
+                )
             stats = self.updater.update(samples)
             self.collector.clear_window()
             return stats

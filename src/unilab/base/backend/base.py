@@ -589,6 +589,18 @@ class SimBackend(abc.ABC):
             (num_envs, num_dof)
         """
 
+    def get_actuator_forces(self) -> np.ndarray:
+        """Return measured actuator forces in actuator order, shape (num_envs, nu)."""
+        raise NotImplementedError("backend does not expose actuator force telemetry")
+
+    def get_body_contact_force_norms(self, body_ids: np.ndarray) -> np.ndarray:
+        """Return net contact force norms (N) for selected non-world bodies."""
+        raise NotImplementedError("backend does not expose net contact force telemetry")
+
+    def get_site_lin_vel_w(self, site_ids: np.ndarray) -> np.ndarray:
+        """Return selected site world linear velocities, shape (num_envs, nsite, 3)."""
+        raise NotImplementedError("backend does not expose site linear velocity telemetry")
+
     # ------------------------------------------------------------------ #
     # Body kinematics — world frame                                        #
     # ------------------------------------------------------------------ #

@@ -8,6 +8,9 @@ Example:
 Writes run.json, timeseries.csv, outcome.json and optional rollout.mp4. Existing
 output directories are never overwritten. Completion is not an automatic gait
 quality verdict; inspect the fixed-command measurements and optional video.
+Protocol v2 gives all cases the same nominal gait period and initial phase pair
+[0, pi], records actual actor command/phase inputs, and exports angular velocity
+in explicitly corrected body and world frames.
 """
 
 from __future__ import annotations

@@ -217,11 +217,8 @@ class G1WalkEnv(
             mujoco_num_threads=cfg.mujoco_num_threads,
             motrix_max_iterations=cfg.motrix_max_iterations,
             post_step_forward_sensor=cfg.post_step_forward_sensor,
-<<<<<<< HEAD
             position_actuator_gains=cfg.control_config.position_actuator_gains,
-=======
             **({"add_body_sensors": True, "reward_telemetry": True} if motion_quality else {}),
->>>>>>> a160a5279959e1f54aa7ce2c8ad6ac14b21c3f61
         )
         super().__init__(cfg, backend, num_envs)
         self._enable_reward_log = True

@@ -87,6 +87,7 @@ env:
     resampling_time: 10.0
     rel_standing_envs: 0.2
     rel_transition_envs: 0.0
+    rel_straight_envs: 0.3
   curriculum:
     enabled: false
   noise_config:
@@ -124,6 +125,8 @@ reward:
   gait_frequency: 1.0
   gait_period_randomization_width: 0.2
   tracking_sigma: 0.25
+  # Tighten yaw-rate tracking without changing linear-velocity tracking.
+  tracking_ang_sigma: 0.05
   base_height_target: 0.78
   min_base_height: 0.3
   max_tilt_deg: 65.0

@@ -68,9 +68,10 @@ def compute_motion_quality_terms(
     clearance_speed = np.linalg.norm(state.clearance_vel_w[:, :, :2], axis=2)
     clearance_error = np.square(state.clearance_heights - cfg.feet_clearance_target)
     lower, upper = soft_joint_limits[:, 0], soft_joint_limits[:, 1]
+    ang_sigma = cfg.tracking_sigma if cfg.tracking_ang_sigma is None else cfg.tracking_ang_sigma
     return {
         "tracking_lin_vel": np.exp(-np.sum(np.square(state.commands[:, :2] - yaw_velocity), axis=1) / cfg.tracking_sigma),
-        "tracking_ang_vel": np.exp(-np.square(state.commands[:, 2] - angvel[:, 2]) / cfg.tracking_sigma),
+        "tracking_ang_vel": np.exp(-np.square(state.commands[:, 2] - angvel[:, 2]) / ang_sigma),
         "alive": np.ones(state.dof_pos.shape[0], dtype=state.dof_pos.dtype),
         "penalty_lin_vel_z": np.square(linvel[:, 2]),
         "penalty_ang_vel_xy": np.sum(np.square(angvel[:, :2]), axis=1),

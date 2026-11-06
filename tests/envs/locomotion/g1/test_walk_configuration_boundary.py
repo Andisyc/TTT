@@ -33,55 +33,72 @@ from unilab.training.backend_adapter import BackendAdapter
 from unilab.training.offpolicy.factory import build_offpolicy_env_cfg_override
 
 
-def test_straight_task_reuses_forward_samples_without_changing_vx(monkeypatch) -> None:
-    monkeypatch.setenv("ICE_CAL_ORACLE_LINEAGE_ID", "straight-sampling")
-    root = Path(__file__).resolve().parents[4]
-    with initialize_config_dir(
-        config_dir=str(root / "conf/offpolicy"), version_base="1.3"
-    ):
-        cfg = compose(
-            "config",
-            overrides=["algo=sac", "task=sac/g1_walk_flat/mujoco_fada_straight"],
-        )
+@pytest.mark.parametrize("num_samples", [1, 4])
+@pytest.mark.parametrize("straight_prob", [0.0, 0.12])
+def test_straight_command_is_independent_of_batch_size(monkeypatch, num_samples, straight_prob):
+    original = np.array([
+        [-0.5, 0.3, -0.7],
+        [-0.5, -0.2, 0.8],
+        [0.6, 0.2, 0.75],
+        [-0.6, -0.3, -0.75],
+    ], dtype=np.float32)[:num_samples]
+    draw = np.array([0.26]) if num_samples == 1 else np.array([0.1, 0.26, 0.7, 0.9])
 
-    assert cfg.env.commands.rel_straight_envs == pytest.approx(0.10)
-    assert cfg.env.commands.rel_standing_envs == pytest.approx(0.30)
-    assert cfg.env.commands.rel_transition_envs == pytest.approx(0.0)
-    assert cfg.env.commands.resampling_time == pytest.approx(0.0)
-    assert cfg.play_profile.env.commands.rel_straight_envs == pytest.approx(0.0)
-
-    original = np.column_stack(
-        [
-            np.linspace(0.2, 0.9, 10),
-            np.full(10, 0.25),
-            np.full(10, 0.5),
-        ]
-    ).astype(np.float32)
-
-    def fake_uniform(*, low=0.0, high=1.0, size=None):
-        del low, high
-        if size == (10, 3):
+    def uniform(*, low=0.0, high=1.0, size=None):
+        if size == (num_samples, 3):
             return original.copy()
-        if size == (10,):
-            return np.full(10, 0.9)
-        raise AssertionError(f"unexpected uniform sample shape {size}")
+        if size == (num_samples,):
+            return draw.copy()
+        return np.full(size, (low + high) / 2)
 
-    monkeypatch.setattr(np.random, "uniform", fake_uniform)
-    monkeypatch.setattr(
-        np.random,
-        "choice",
-        lambda candidates, *, size, replace: np.asarray([candidates[-1]]),
-    )
-    command_cfg = SimpleNamespace(
-        **OmegaConf.to_container(cfg.env.commands, resolve=True)
+    monkeypatch.setattr(np.random, "uniform", uniform)
+    commands = SimpleNamespace(
+        vel_limit=[[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]],
+        small_xy_threshold=0.0,
+        rel_standing_envs=0.2,
+        rel_transition_envs=0.0,
+        rel_straight_envs=straight_prob,
     )
     sampled = sample_g1_walk_commands(
-        SimpleNamespace(cfg=SimpleNamespace(commands=command_cfg)), len(original)
+        SimpleNamespace(cfg=SimpleNamespace(commands=commands)), num_samples
     )
+    expected = original.copy()
+    if num_samples == 4:
+        expected[0] = 0.0
+    if straight_prob > 0:
+        expected[0 if num_samples == 1 else 1] = [0.5, 0.0, 0.0]
+    np.testing.assert_allclose(sampled, expected)
 
-    np.testing.assert_allclose(sampled[:, 0], original[:, 0])
-    np.testing.assert_allclose(sampled[:-1], original[:-1])
-    np.testing.assert_allclose(sampled[-1], [original[-1, 0], 0.0, 0.0])
+
+def test_straight_bucket_does_not_replace_transition_commands(monkeypatch):
+    original = np.array([
+        [-0.5, 0.3, -0.7], [-0.5, -0.2, 0.8],
+        [0.6, 0.2, 0.75], [-0.6, -0.3, -0.75],
+    ], dtype=np.float32)
+
+    def uniform(*, low=0.0, high=1.0, size=None):
+        if size == (4, 3):
+            return original.copy()
+        if size == (4,):
+            return np.array([0.1, 0.25, 0.35, 0.9])
+        return np.broadcast_to((np.asarray(low) + high) / 2, size).copy()
+
+    monkeypatch.setattr(np.random, "uniform", uniform)
+    commands = SimpleNamespace(
+        vel_limit=[[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]],
+        transition_vel_limit=[[0.05, -0.1, -0.2], [0.25, 0.1, 0.2]],
+        small_xy_threshold=0.0,
+        rel_standing_envs=0.2,
+        rel_transition_envs=0.1,
+        rel_straight_envs=0.12,
+    )
+    sampled = sample_g1_walk_commands(
+        SimpleNamespace(cfg=SimpleNamespace(commands=commands)), 4
+    )
+    np.testing.assert_allclose(sampled, [
+        [0.0, 0.0, 0.0], [0.15, 0.0, 0.0],
+        [0.5, 0.0, 0.0], original[3],
+    ])
 
 
 def test_yaml_parameters_reach_typed_config_without_weakening_checkpoint_identity(monkeypatch, capsys):

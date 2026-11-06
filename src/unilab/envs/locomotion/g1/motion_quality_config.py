@@ -27,6 +27,8 @@ class MotionQualityRewardConfig(G1WalkRewardConfig):
     """Reuse G1 safety/pose settings, not its historical reward dispatch."""
 
     profile: ClassVar[str] = "unitree_motion_quality_v1"
+    # Saved recipes without a separate angular width retain tracking_sigma.
+    tracking_ang_sigma: float | None = None
     gait_period_randomization_width: float = 0.2
     gait_duty_factor: float = 0.55
     contact_force_threshold: float = 1.0
@@ -39,6 +41,10 @@ class MotionQualityRewardConfig(G1WalkRewardConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.tracking_ang_sigma is not None and (
+            not math.isfinite(self.tracking_ang_sigma) or self.tracking_ang_sigma <= 0
+        ):
+            raise ValueError("reward.tracking_ang_sigma must be finite and positive")
         if self.scales.keys() != MOTION_QUALITY_TERMS:
             raise ValueError(
                 f"motion-quality reward terms mismatch: missing={sorted(MOTION_QUALITY_TERMS - self.scales.keys())}, "

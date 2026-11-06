@@ -4,6 +4,9 @@ CSV rows contain actions applied over [(step-1)*dt, step*dt] and the resulting
 physical state at step*dt. Each case stops recording at its first termination;
 no reset episodes or padded samples are joined. These are acceptance diagnostics,
 not an OAT protocol, Etilt definition, or an automatic policy-quality verdict.
+All rows start at the task keyframe with a shared nominal gait period and phase
+pair [0, pi]. Policy command/phase columns are PRE-step raw actor inputs;
+physical columns are POST-step measurements. Protocol v2 fixes angular frames.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from omegaconf import OmegaConf
 from scipy.spatial.transform import Rotation
 
 from unilab.algos.torch.distill.collection.transition import set_transition_input_rows
-from unilab.envs.common.rotation import np_quat_apply_inverse
+from unilab.envs.common.rotation import np_quat_apply, np_quat_apply_inverse
 from unilab.training import ensure_registries
 from unilab.training.oracle.checkpoint import read_oracle_checkpoint
 from unilab.training.oracle.playback import build_oracle_play_environment
@@ -41,6 +44,26 @@ PHYSICAL_COLUMNS = (
     "wx_body_rad_s", "wy_body_rad_s", "wz_body_rad_s",
     "roll_rad", "pitch_rad", "yaw_rad",
 )
+
+
+def _base_measurements(env: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Canonical MuJoCo free-root qvel is world-linear but BODY-angular."""
+    position = env.get_base_pos()
+    quaternion = env.get_base_quat()
+    linear_world = env.get_base_lin_vel()
+    angular_body = env.get_base_ang_vel()
+    physical = np.concatenate((position, quaternion, linear_world, angular_body), axis=1)
+    valid = np.isfinite(physical).all(axis=1)
+    values = np.full((env.num_envs, len(PHYSICAL_COLUMNS)), np.nan)
+    if valid.any():
+        quat = quaternion[valid]
+        values[valid] = np.concatenate((
+            position[valid], quat, linear_world[valid],
+            np_quat_apply(quat, angular_body[valid]),
+            np_quat_apply_inverse(quat, linear_world[valid]), angular_body[valid],
+            Rotation.from_quat(quat[:, [1, 2, 3, 0]]).as_euler("xyz"),
+        ), axis=1)
+    return values, valid
 
 
 def evaluate_motion_quality_oracle(
@@ -82,11 +105,13 @@ def evaluate_motion_quality_oracle(
     outcomes: dict[str, dict[str, Any]] = {}
     metadata: dict[str, Any] = {
         "checkpoint_path": str(checkpoint_path), "checkpoint_metadata": payload["metadata"],
+        "acceptance_protocol": "nominal_fixed_command_v2",
         "seed": seed, "requested_duration_s": duration_s,
         "cases": [{"name": name, "command": list(command)} for name, command in CASES],
         "online_updates": False, "payload_enabled": False, "record_video": record_video,
         "pose_source": "public env.get_base_* (base, not the actor torso gyro)",
         "quaternion_order": "wxyz; base orientation in world",
+        "angular_velocity_source": "MuJoCo free-joint qvel[3:6] in body frame; rotate once to world",
         "command_frame": "base/body vx, vy in m/s and yaw rate in rad/s",
         "row_timing": "action over [(step-1)*ctrl_dt, step*ctrl_dt]; post-step state",
         "termination_rule": "first terminated/truncated/invalid-physics row ends that case",
@@ -96,12 +121,20 @@ def evaluate_motion_quality_oracle(
     }
     action_columns = [f"action_{i}" for i in range(payload["metadata"]["network_config"]["action_dim"])]
     fieldnames = ["case", "step", "time_s", "wall_elapsed_s", "command_vx_m_s",
-                  "command_vy_m_s", "command_wz_rad_s", "physical_valid", "terminated",
+                  "command_vy_m_s", "command_wz_rad_s", "policy_command_vx_m_s",
+                  "policy_command_vy_m_s", "policy_command_wz_rad_s",
+                  "policy_gait_phase_left_rad", "policy_gait_phase_right_rad",
+                  "policy_gait_period_s", "physical_valid", "terminated",
                   "truncated", *PHYSICAL_COLUMNS, *action_columns]
     active = np.ones(len(CASES), dtype=bool)
     execution_status, error = "finished", None
     step = 0
     ctrl_dt = 0.0
+    observation_slices: dict[str, slice] = {}
+    offset = 0
+    for name, width in payload["metadata"]["observation_layout"]:
+        observation_slices[name] = slice(offset, offset + int(width))
+        offset += int(width)
     try:
         env, cfg = build_oracle_play_environment(
             payload, num_envs=len(CASES), device=device, env_patch=patch,
@@ -112,6 +145,23 @@ def evaluate_motion_quality_oracle(
         env.set_autoreset(False)
         env.init_state()
         env.reset(np.arange(len(CASES), dtype=np.int32))
+        # Only the acceptance state changes; training reset/randomization stays untouched.
+        initial = env.state
+        initial.info["gait_phase"][:] = np.asarray(
+            [0.0, np.pi], dtype=initial.info["gait_phase"].dtype,
+        )
+        initial.info["mq_gait_period"].fill(1.0 / float(env.cfg.reward_config.gait_frequency))
+        initial_state = {
+            "base_pos_world_m": env.get_base_pos(),
+            "base_quat_wxyz": env.get_base_quat(),
+            "joint_pos_rad": env.get_dof_pos(),
+            "joint_vel_rad_s": env.get_dof_vel(),
+            "base_lin_vel_world_m_s": env.get_base_lin_vel(),
+            "base_ang_vel_body_rad_s": env.get_base_ang_vel(),
+        }
+        for name, values in initial_state.items():
+            if not np.allclose(values, values[:1], rtol=0.0, atol=1e-7):
+                raise ValueError(f"acceptance cases require identical initial state: {name}")
         obs, info = set_transition_input_rows(env, command_info_key="commands", command_rows=commands)
         metadata.update({
             "effective_config": OmegaConf.to_container(cfg, resolve=True),
@@ -121,6 +171,9 @@ def evaluate_motion_quality_oracle(
             "action_joint_names": payload["metadata"]["actuated_joint_names"],
             "initial_base_pos_world_m": env.get_base_pos().tolist(),
             "initial_base_quat_wxyz": env.get_base_quat().tolist(),
+            "initial_conditions": {name: values.tolist() for name, values in initial_state.items()},
+            "initial_gait_phase_rad": info["gait_phase"].tolist(),
+            "gait_period_s": info["mq_gait_period"].tolist(),
         })
         guarded = np.zeros(len(CASES), dtype=bool)
 
@@ -139,19 +192,16 @@ def evaluate_motion_quality_oracle(
             obs, info = set_transition_input_rows(
                 env, command_info_key="commands", command_rows=commanded,
             )
+            policy_commands = obs["obs"][:, observation_slices["command"]].copy()
+            policy_phase = obs["obs"][:, observation_slices["gait_phase"]].copy()
+            policy_period = info["mq_gait_period"].copy()
+            if not np.allclose(policy_commands[active], commands[active], rtol=0.0, atol=1e-6):
+                raise RuntimeError("actor observations do not contain the requested fixed commands")
             actions = teacher.actions_from_env_observation(obs, info)
             actions[~active] = 0.0
             state = env.step(actions)
-            physical = np.concatenate((env.get_base_pos(), env.get_base_quat(),
-                                       env.get_base_lin_vel(), env.get_base_ang_vel()), axis=1)
-            valid = np.isfinite(physical).all(axis=1) & ~guarded
-            derived = np.full((len(CASES), 9), np.nan)
-            if valid.any():
-                quat = physical[valid, 3:7]
-                derived[valid, :3] = np_quat_apply_inverse(quat, physical[valid, 7:10])
-                derived[valid, 3:6] = np_quat_apply_inverse(quat, physical[valid, 10:13])
-                derived[valid, 6:] = Rotation.from_quat(quat[:, [1, 2, 3, 0]]).as_euler("xyz")
-            values = np.concatenate((physical, derived), axis=1)
+            values, valid = _base_measurements(env)
+            valid &= ~guarded
             for i in np.flatnonzero(active):
                 name = CASES[i][0]
                 terminated, truncated = bool(state.terminated[i]), bool(state.truncated[i])
@@ -160,6 +210,12 @@ def evaluate_motion_quality_oracle(
                     "wall_elapsed_s": time.monotonic() - started,
                     "command_vx_m_s": float(commands[i, 0]), "command_vy_m_s": float(commands[i, 1]),
                     "command_wz_rad_s": float(commands[i, 2]), "physical_valid": bool(valid[i]),
+                    "policy_command_vx_m_s": float(policy_commands[i, 0]),
+                    "policy_command_vy_m_s": float(policy_commands[i, 1]),
+                    "policy_command_wz_rad_s": float(policy_commands[i, 2]),
+                    "policy_gait_phase_left_rad": float(policy_phase[i, 0]),
+                    "policy_gait_phase_right_rad": float(policy_phase[i, 1]),
+                    "policy_gait_period_s": float(policy_period[i]),
                     "terminated": terminated, "truncated": truncated,
                     **dict(zip(PHYSICAL_COLUMNS, values[i].tolist() if valid[i] else [None] * len(PHYSICAL_COLUMNS))),
                     **dict(zip(action_columns, actions[i].tolist())),

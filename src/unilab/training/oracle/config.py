@@ -197,6 +197,8 @@ def validate_oracle_config(cfg: DictConfig) -> OracleInterface:
         "feet_clearance_tanh_mult", "close_feet_threshold",
     ):
         _number(cfg, f"reward.{name}", positive=True)
+    if OmegaConf.select(cfg, "reward.tracking_ang_sigma") is not None:
+        _number(cfg, "reward.tracking_ang_sigma", positive=True)
     if not 0.5 < _number(cfg, "reward.gait_duty_factor") < 1:
         raise ValueError("reward.gait_duty_factor must be in (0.5, 1)")
     if _number(cfg, "reward.gait_period_randomization_width") >= 1 / _number(cfg, "reward.gait_frequency"):

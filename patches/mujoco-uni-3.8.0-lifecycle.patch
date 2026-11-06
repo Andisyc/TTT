@@ -1,0 +1,476 @@
+--- a/mujoco/batch_env.cc
++++ b/mujoco/batch_env.cc
+@@ -24,11 +24,13 @@
+ // caller-supplied env_ids array.
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <cmath>
+ #include <cstddef>
+ #include <memory>
+ #include <optional>
+ #include <sstream>
++#include <stdexcept>
+ #include <string>
+ #include <unordered_map>
+ #include <utility>
+@@ -654,32 +656,31 @@
+                            int chunk_size, bool control_is_constant) {
+   int nfulljobs = nbatch / chunk_size;
+   int chunk_remainder = nbatch % chunk_size;
+-  int njobs = (chunk_remainder > 0) ? nfulljobs + 1 : nfulljobs;
+ 
+-  pool->ResetCount();
++  ThreadPool::TaskBatch batch(*pool);
+ 
+   for (int j = 0; j < nfulljobs; j++) {
+     auto task = [=, &m, &d](void) {
+       int id = pool->WorkerId();
+-      _unsafe_step(m, d[id], j * chunk_size, (j + 1) * chunk_size, nstep,
+-                   control_spec, state0, warmstart0, control, state_out,
+-                   sensordata_out, post_step_forward_sensor,
+-                   control_is_constant);
++      InterceptMjErrors(_unsafe_step)(
++          m, d[id], j * chunk_size, (j + 1) * chunk_size, nstep,
++          control_spec, state0, warmstart0, control, state_out,
++          sensordata_out, post_step_forward_sensor, control_is_constant);
+     };
+-    pool->Schedule(task);
++    batch.Schedule(std::move(task));
+   }
+   if (chunk_remainder > 0) {
+     auto task = [=, &m, &d](void) {
+-      _unsafe_step(m, d[pool->WorkerId()], nfulljobs * chunk_size,
+-                   nfulljobs * chunk_size + chunk_remainder, nstep,
+-                   control_spec, state0, warmstart0, control, state_out,
+-                   sensordata_out, post_step_forward_sensor,
+-                   control_is_constant);
++      InterceptMjErrors(_unsafe_step)(
++          m, d[pool->WorkerId()], nfulljobs * chunk_size,
++          nfulljobs * chunk_size + chunk_remainder, nstep,
++          control_spec, state0, warmstart0, control, state_out,
++          sensordata_out, post_step_forward_sensor, control_is_constant);
+     };
+-    pool->Schedule(task);
++    batch.Schedule(std::move(task));
+   }
+ 
+-  pool->WaitCount(njobs);
++  batch.Wait();
+ }
+ 
+ // Subset reset kernel. Iterates over env_ids[start, end), applies per-env
+@@ -759,32 +760,31 @@
+     int chunk_size) {
+   int nfulljobs = n / chunk_size;
+   int chunk_remainder = n % chunk_size;
+-  int njobs = (chunk_remainder > 0) ? nfulljobs + 1 : nfulljobs;
+ 
+-  pool->ResetCount();
++  ThreadPool::TaskBatch batch(*pool);
+ 
+   for (int j = 0; j < nfulljobs; j++) {
+     auto task = [=, &models, &d](void) {
+       int id = pool->WorkerId();
+-      _unsafe_subset_reset_range(models, d[id], env_ids, j * chunk_size,
+-                                 (j + 1) * chunk_size, initial_state,
+-                                 initial_warmstart, needs_refresh_per_k,
+-                                 state_out, sensordata_out, skipsensor);
++      InterceptMjErrors(_unsafe_subset_reset_range)(
++          models, d[id], env_ids, j * chunk_size, (j + 1) * chunk_size,
++          initial_state, initial_warmstart, needs_refresh_per_k,
++          state_out, sensordata_out, skipsensor);
+     };
+-    pool->Schedule(task);
++    batch.Schedule(std::move(task));
+   }
+   if (chunk_remainder > 0) {
+     auto task = [=, &models, &d](void) {
+-      _unsafe_subset_reset_range(
++      InterceptMjErrors(_unsafe_subset_reset_range)(
+           models, d[pool->WorkerId()], env_ids, nfulljobs * chunk_size,
+           nfulljobs * chunk_size + chunk_remainder, initial_state,
+           initial_warmstart, needs_refresh_per_k, state_out, sensordata_out,
+           skipsensor);
+     };
+-    pool->Schedule(task);
++    batch.Schedule(std::move(task));
+   }
+ 
+-  pool->WaitCount(njobs);
++  batch.Wait();
+ }
+ 
+ // ===================================================================
+@@ -851,30 +851,29 @@
+                                    ThreadPool* pool, int chunk_size) {
+   int nfulljobs = nbatch / chunk_size;
+   int chunk_remainder = nbatch % chunk_size;
+-  int njobs = (chunk_remainder > 0) ? nfulljobs + 1 : nfulljobs;
+ 
+-  pool->ResetCount();
++  ThreadPool::TaskBatch batch(*pool);
+ 
+   for (int j = 0; j < nfulljobs; j++) {
+     auto task = [=, &models, &d](void) {
+       int id = pool->WorkerId();
+-      _unsafe_full_forward_range(models, d[id], j * chunk_size,
+-                                 (j + 1) * chunk_size, state0, warmstart0,
+-                                 sensordata_out, skipsensor);
++      InterceptMjErrors(_unsafe_full_forward_range)(
++          models, d[id], j * chunk_size, (j + 1) * chunk_size,
++          state0, warmstart0, sensordata_out, skipsensor);
+     };
+-    pool->Schedule(task);
++    batch.Schedule(std::move(task));
+   }
+   if (chunk_remainder > 0) {
+     auto task = [=, &models, &d](void) {
+-      _unsafe_full_forward_range(
++      InterceptMjErrors(_unsafe_full_forward_range)(
+           models, d[pool->WorkerId()], nfulljobs * chunk_size,
+           nfulljobs * chunk_size + chunk_remainder, state0, warmstart0,
+           sensordata_out, skipsensor);
+     };
+-    pool->Schedule(task);
++    batch.Schedule(std::move(task));
+   }
+ 
+-  pool->WaitCount(njobs);
++  batch.Wait();
+ }
+ 
+ // Site-Jacobian kernel. Per env: setState, run kinematics + comPos prefix
+@@ -948,30 +947,29 @@
+                                 ThreadPool* pool, int chunk_size) {
+   int nfulljobs = nbatch / chunk_size;
+   int chunk_remainder = nbatch % chunk_size;
+-  int njobs = (chunk_remainder > 0) ? nfulljobs + 1 : nfulljobs;
+ 
+-  pool->ResetCount();
++  ThreadPool::TaskBatch batch(*pool);
+ 
+   for (int j = 0; j < nfulljobs; j++) {
+     auto task = [=, &models, &d](void) {
+       int id = pool->WorkerId();
+-      _unsafe_jacobians_range(models, d[id], j * chunk_size,
+-                              (j + 1) * chunk_size, state0, warmstart0,
+-                              site_ids, nsite_query, jacp_out, jacr_out);
++      InterceptMjErrors(_unsafe_jacobians_range)(
++          models, d[id], j * chunk_size, (j + 1) * chunk_size, state0,
++          warmstart0, site_ids, nsite_query, jacp_out, jacr_out);
+     };
+-    pool->Schedule(task);
++    batch.Schedule(std::move(task));
+   }
+   if (chunk_remainder > 0) {
+     auto task = [=, &models, &d](void) {
+-      _unsafe_jacobians_range(
++      InterceptMjErrors(_unsafe_jacobians_range)(
+           models, d[pool->WorkerId()], nfulljobs * chunk_size,
+           nfulljobs * chunk_size + chunk_remainder, state0, warmstart0,
+           site_ids, nsite_query, jacp_out, jacr_out);
+     };
+-    pool->Schedule(task);
++    batch.Schedule(std::move(task));
+   }
+ 
+-  pool->WaitCount(njobs);
++  batch.Wait();
+ }
+ 
+ // Hfield bilinear sampling kernel. Per env: set full-physics state, run the
+@@ -1076,31 +1074,30 @@
+     ThreadPool* pool, int chunk_size) {
+   int nfulljobs = nbatch / chunk_size;
+   int chunk_remainder = nbatch % chunk_size;
+-  int njobs = (chunk_remainder > 0) ? nfulljobs + 1 : nfulljobs;
+ 
+-  pool->ResetCount();
++  ThreadPool::TaskBatch batch(*pool);
+ 
+   for (int j = 0; j < nfulljobs; j++) {
+     auto task = [=, &models, &d](void) {
+       int id = pool->WorkerId();
+-      _unsafe_hfield_sample_range(
++      InterceptMjErrors(_unsafe_hfield_sample_range)(
+           models, d[id], j * chunk_size, (j + 1) * chunk_size, state0,
+           hfield_geom_id, offsets, npoint, frame_body_id, alignment, output,
+           sample_out);
+     };
+-    pool->Schedule(task);
++    batch.Schedule(std::move(task));
+   }
+   if (chunk_remainder > 0) {
+     auto task = [=, &models, &d](void) {
+-      _unsafe_hfield_sample_range(
++      InterceptMjErrors(_unsafe_hfield_sample_range)(
+           models, d[pool->WorkerId()], nfulljobs * chunk_size,
+           nfulljobs * chunk_size + chunk_remainder, state0, hfield_geom_id,
+           offsets, npoint, frame_body_id, alignment, output, sample_out);
+     };
+-    pool->Schedule(task);
++    batch.Schedule(std::move(task));
+   }
+ 
+-  pool->WaitCount(njobs);
++  batch.Wait();
+ }
+ 
+ mjtNum* optional_array_ptr(const std::optional<PyCArray>& arg, const char* name,
+@@ -1130,6 +1127,22 @@
+ // Pool.
+ // ===================================================================
+ 
++// A pool's model/data and completion counter belong to one call at a time.
++class PoolOperation {
++ public:
++  explicit PoolOperation(std::atomic_flag& active) : active_(active) {
++    if (active_.test_and_set(std::memory_order_acquire)) {
++      throw std::runtime_error("BatchEnvPool does not support overlapping operations");
++    }
++  }
++  PoolOperation(const PoolOperation&) = delete;
++  PoolOperation& operator=(const PoolOperation&) = delete;
++  ~PoolOperation() { active_.clear(std::memory_order_release); }
++
++ private:
++  std::atomic_flag& active_;
++};
++
+ class BatchEnvPool {
+  public:
+   BatchEnvPool(py::object model_obj, int nbatch, int nthread)
+@@ -1261,6 +1274,7 @@
+                   std::optional<const PyCArray> control,
+                   std::optional<int> chunk_size, bool return_sensor,
+                   bool post_step_forward_sensor) {
++    PoolOperation operation(operation_active_);
+     if (nstep < 1) {
+       throw py::value_error("nstep must be >= 1");
+     }
+@@ -1324,7 +1338,7 @@
+         int chunk = chunk_size.has_value()
+                         ? *chunk_size
+                         : std::max(1, nbatch_ / (10 * nthread_));
+-        InterceptMjErrors(_unsafe_step_threaded)(
++        _unsafe_step_threaded(
+             cmodels, worker_data_, nbatch_, nstep, control_spec, state0_ptr,
+             warmstart0_ptr, control_ptr, state_ptr, sensordata_ptr,
+             post_step_forward_sensor, pool_.get(), chunk,
+@@ -1352,6 +1366,7 @@
+   PyCArray forward(const PyCArray state0,
+                    std::optional<const PyCArray> warmstart0, bool skipsensor,
+                    std::optional<int> chunk_size) {
++    PoolOperation operation(operation_active_);
+     if (state0.shape(0) != nbatch_) {
+       std::ostringstream msg;
+       msg << "state0.shape[0]=" << state0.shape(0)
+@@ -1376,7 +1391,7 @@
+         int chunk = chunk_size.has_value()
+                         ? *chunk_size
+                         : std::max(1, nbatch_ / (10 * nthread_));
+-        InterceptMjErrors(_unsafe_full_forward_threaded)(
++        _unsafe_full_forward_threaded(
+             models_, worker_data_, nbatch_, state0_ptr, warmstart0_ptr,
+             sensordata_ptr, skipsensor ? 1 : 0, pool_.get(), chunk);
+       } else {
+@@ -1406,6 +1421,7 @@
+       const PyCArray state0, const PyIArray site_ids, bool jacp, bool jacr,
+       std::optional<const PyCArray> warmstart0,
+       std::optional<int> chunk_size) {
++    PoolOperation operation(operation_active_);
+     if (!jacp && !jacr) {
+       throw py::value_error(
+           "compute_site_jacobians: at least one of jacp / jacr must be True");
+@@ -1470,7 +1486,7 @@
+         int chunk = chunk_size.has_value()
+                         ? *chunk_size
+                         : std::max(1, nbatch_ / (10 * nthread_));
+-        InterceptMjErrors(_unsafe_jacobians_threaded)(
++        _unsafe_jacobians_threaded(
+             models_, worker_data_, nbatch_, state0_ptr, warmstart0_ptr,
+             site_ids_ptr, nsite_query, jacp_ptr, jacr_ptr, pool_.get(), chunk);
+       } else {
+@@ -1505,6 +1521,7 @@
+       const PyCArray state0, int hfield_geom_id, const PyCArray offsets,
+       int frame_body_id, const std::string& alignment,
+       const std::string& output, std::optional<int> chunk_size) {
++    PoolOperation operation(operation_active_);
+     if (state0.ndim() != 2 || state0.shape(0) != nbatch_ ||
+         state0.shape(1) != nstate_) {
+       std::ostringstream msg;
+@@ -1555,7 +1572,7 @@
+         int chunk = chunk_size.has_value()
+                         ? *chunk_size
+                         : std::max(1, nbatch_ / (10 * nthread_));
+-        InterceptMjErrors(_unsafe_hfield_sample_threaded)(
++        _unsafe_hfield_sample_threaded(
+             models_, worker_data_, nbatch_, state0_ptr, hfield_geom_id,
+             offsets_ptr, npoint, frame_body_id, alignment_enum, output_enum,
+             sample_ptr, pool_.get(), chunk);
+@@ -1581,6 +1598,7 @@
+                   std::optional<py::dict> randomization,
+                   std::optional<const PyCArray> initial_warmstart,
+                   bool skipsensor, std::optional<int> chunk_size) {
++    PoolOperation operation(operation_active_);
+     // Canonicalize env_ids to contiguous int32.
+     py::module_ np = py::module_::import("numpy");
+     py::object ids_obj = np.attr("ascontiguousarray")(
+@@ -1675,7 +1693,7 @@
+         int chunk = chunk_size.has_value()
+                         ? *chunk_size
+                         : std::max(1, n / (10 * nthread_));
+-        InterceptMjErrors(_unsafe_subset_reset_threaded)(
++        _unsafe_subset_reset_threaded(
+             models_, worker_data_, env_ids_ptr, n, initial_state_ptr,
+             initial_warmstart_ptr, refresh_ptr, state_ptr, sensordata_ptr,
+             skipsensor ? 1 : 0, pool_.get(), chunk);
+@@ -1700,6 +1718,7 @@
+   int nsensordata() const { return nsensordata_; }
+ 
+   py::object get_model(int env_id) {
++    PoolOperation operation(operation_active_);
+     ValidateEnvIdOrThrow(env_id, nbatch_);
+     raw::MjModel* model = EnsureUniqueModel(env_id);
+     if (MjModelWrapper* wrapper = MjModelWrapper::FromRawPointer(model)) {
+@@ -1741,6 +1760,7 @@
+   // Intended for tests. The returned array shares memory with the pool and
+   // must not be mutated by the caller.
+   py::array_t<mjtNum> get_field(int env_id, const std::string& name) {
++    PoolOperation operation(operation_active_);
+     ValidateEnvIdOrThrow(env_id, nbatch_);
+     const FieldSpec& spec = LookupFieldOrThrow(name);
+     int sz = FieldSize(spec.id, models_[env_id]);
+@@ -1753,6 +1773,7 @@
+ 
+   py::array_t<mjtNum> get_field_indexed(int env_id, const std::string& name,
+                                         const PyIArray indices) {
++    PoolOperation operation(operation_active_);
+     ValidateEnvIdOrThrow(env_id, nbatch_);
+     const FieldSpec& spec = LookupFieldOrThrow(name);
+     py::buffer_info index_info = indices.request();
+@@ -1779,6 +1800,7 @@
+ 
+   void set_field_indexed(int env_id, const std::string& name,
+                          const PyIArray indices, const PyCArray value) {
++    PoolOperation operation(operation_active_);
+     ValidateEnvIdOrThrow(env_id, nbatch_);
+     const FieldSpec& spec = LookupFieldOrThrow(name);
+     py::buffer_info index_info = indices.request();
+@@ -1811,6 +1833,7 @@
+   }
+ 
+  private:
++  std::atomic_flag operation_active_ = ATOMIC_FLAG_INIT;
+   int nbatch_;
+   int nthread_;
+   int nstate_ = 0;
+--- a/mujoco/threadpool.cc
++++ b/mujoco/threadpool.cc
+@@ -74,10 +74,17 @@
+       }
+       break;
+     }
+-    task();
++    std::exception_ptr error;
++    try {
++      task();
++    } catch (...) {
++      error = std::current_exception();
++    }
++    task = nullptr;
+ 
+     {
+       std::unique_lock<std::mutex> lock(m_);
++      if (error && !error_) error_ = std::move(error);
+       ++ctr_;
+       cv_ext_.notify_one();
+     }
+--- a/mujoco/threadpool.h
++++ b/mujoco/threadpool.h
+@@ -17,10 +17,12 @@
+ 
+ #include <condition_variable>
+ #include <cstdint>
++#include <exception>
+ #include <functional>
+ #include <mutex>
+ #include <queue>
+ #include <thread>
++#include <utility>
+ #include <vector>
+ 
+ #include <absl/base/attributes.h>
+@@ -47,17 +49,60 @@
+   void Schedule(std::function<void()> task);
+ 
+   // return number of tasks completed
+-  std::uint64_t GetCount() { return ctr_; }
++  std::uint64_t GetCount() {
++    std::lock_guard<std::mutex> lock(m_);
++    return ctr_;
++  }
+ 
+   // reset count to zero
+-  void ResetCount() { ctr_ = 0; }
++  void ResetCount() {
++    std::lock_guard<std::mutex> lock(m_);
++    ctr_ = 0;
++    error_ = nullptr;
++  }
+ 
+   // wait for count, then return
+   void WaitCount(int value) {
+     std::unique_lock<std::mutex> lock(m_);
+-    cv_ext_.wait(lock, [&]() { return this->GetCount() >= value; });
++    cv_ext_.wait(lock, [&]() { return ctr_ >= value; });
++    auto error = error_;
++    lock.unlock();
++    if (error) std::rethrow_exception(error);
+   }
+ 
++  // Keep captured storage alive even if submission fails partway through.
++  class TaskBatch {
++   public:
++    explicit TaskBatch(ThreadPool& pool) : pool_(pool) { pool_.ResetCount(); }
++    TaskBatch(const TaskBatch&) = delete;
++    TaskBatch& operator=(const TaskBatch&) = delete;
++
++    ~TaskBatch() {
++      if (!waited_) {
++        try {
++          pool_.WaitCount(submitted_);
++        } catch (...) {
++          // Preserve the submission exception while retiring sibling tasks.
++        }
++      }
++    }
++
++    void Schedule(std::function<void()> task) {
++      pool_.Schedule(std::move(task));
++      ++submitted_;
++    }
++
++    void Wait() {
++      waited_ = true;
++      pool_.WaitCount(submitted_);
++    }
++
++   private:
++    ThreadPool& pool_;
++    int submitted_ = 0;
++    bool waited_ = false;
++  };
++
+  private:
+   // ----- methods ----- //
+ 
+@@ -73,6 +118,7 @@
+   std::condition_variable cv_ext_;
+   std::queue<std::function<void()>> queue_;
+   std::uint64_t ctr_;
++  std::exception_ptr error_;
+ };
+ 
+ }  // namespace mujoco::python

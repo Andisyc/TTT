@@ -150,14 +150,18 @@ def sample_g1_walk_commands(env: Any, num_samples: int) -> np.ndarray:
                 dtype=get_global_dtype(),
             )
     if straight_prob > 0.0:
-        ordinary = draw >= standing_prob + transition_prob
-        forward = commands[:, 0] > float(
-            getattr(env.cfg.commands, "small_xy_threshold", 0.0)
-        )
-        candidates = np.flatnonzero(ordinary & forward)
-        target_count = min(int(round(straight_prob * num_samples)), len(candidates))
-        if target_count > 0:
-            straight = np.random.choice(candidates, size=target_count, replace=False)
+        start = standing_prob + transition_prob
+        straight = (draw >= start) & (draw < start + straight_prob)
+        num_straight = int(np.count_nonzero(straight))
+        if num_straight > 0:
+            forward_low = max(
+                float(low[0]),
+                float(getattr(env.cfg.commands, "small_xy_threshold", 0.0)),
+                float(np.finfo(commands.dtype).tiny),
+            )
+            commands[straight, 0] = np.random.uniform(
+                low=forward_low, high=float(high[0]), size=num_straight
+            )
             commands[straight, 1:3] = 0.0
     if command_gated:
         commands = canonicalize_g1_commands(

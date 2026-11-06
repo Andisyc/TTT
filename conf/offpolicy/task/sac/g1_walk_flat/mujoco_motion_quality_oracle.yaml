@@ -87,7 +87,9 @@ env:
     resampling_time: 10.0
     rel_standing_envs: 0.2
     rel_transition_envs: 0.0
-    rel_straight_envs: 0.3
+    # Per-environment categories: 20% standing, 12% forward straight, 68% ordinary.
+    # Ordinary commands keep the full velocity range; symmetric yaw gives ~34% per turn sign.
+    rel_straight_envs: 0.12
   curriculum:
     enabled: false
   noise_config:

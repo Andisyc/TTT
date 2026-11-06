@@ -55,6 +55,34 @@ rounded up to complete control steps and both requested and actual times are rec
 Ctrl-C, SIGTERM and errors use the recorder's existing flush/close path.
 No evaluation is silently inferred when collection alone is requested.
 
+## Isolated MuJoCo native lifecycle repair
+
+`patches/mujoco-uni-3.8.0-lifecycle.patch` targets the exact source archive locked
+in `uv.lock`. It rejects overlapping operations on one BatchEnvPool, retires
+submitted tasks before unwinding, and propagates worker errors after sibling
+tasks finish. MuJoCo fatal-error jump contexts are installed on the worker
+that calls MuJoCo, rather than on the dispatching thread.
+
+Build and check an opt-in overlay with the existing MuJoCo 3.8.0 environment,
+CMake, a C++17 compiler, and `patch`:
+
+```bash
+uv run --frozen --no-sync python scripts/build_mujoco_lifecycle_overlay.py \
+  --work-dir /tmp/unilab-mujoco-lifecycle
+```
+
+The builder verifies the locked source SHA256, rebuilds the Python binding
+family together to avoid mixed C++ ABIs/unwinders, and exercises native failure,
+completion, output-lifetime, and serial-reference physics contracts. It leaves
+the installed extension unchanged and prints `VERIFIED_OVERLAY`. Only processes
+explicitly given that directory through `PYTHONPATH` use the patched bindings;
+removing that override returns to the installed package. No training is started.
+For offline builds, supply `--source-archive`, `--abseil-source`, `--eigen-source`,
+and `--pybind11-source` using the fixed source versions in the builder.
+Passing these checks verifies the repaired boundary, not elimination of an
+intermittent training crash. The sibling standalone `mujoco-uni-runtime` package
+is not substituted for the locked production package.
+
 ## Process material
 
 `superpowers/` contains dated implementation plans and design working records produced by the

@@ -51,7 +51,6 @@ def _build_keyboard_commander(env: Any, args) -> KeyboardCommander | None:
         step_lin=float(getattr(args, "keyboard_step_lin", 0.1)),
         step_ang=float(getattr(args, "keyboard_step_ang", 0.2)),
     )
-    env.state.info["commands"][:] = commander.command
     return commander
 
 

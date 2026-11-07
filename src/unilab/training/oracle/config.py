@@ -100,8 +100,6 @@ def validate_oracle_config(cfg: DictConfig) -> OracleInterface:
         "algo.algo": "sac",
         "algo.runtime_impl": ORACLE_RUNTIME_IMPL,
         "algo.runtime_resolver": ORACLE_RUNTIME_RESOLVER,
-        "algo.use_symmetry": False,
-        "algo.symmetry_mirror_loss_coeff": 0.0,
         "algo.load_run": "-1",
         "algo.actor_warm_start_checkpoint": None,
         "algo.actor_warm_start_adapter": None,

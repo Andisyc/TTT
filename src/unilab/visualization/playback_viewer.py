@@ -377,9 +377,10 @@ def _create_interactive_session(
             algo_name=algo,
             log=log,
         )
-        _warn_if_g1_sac_checkpoint_lacks_standing_contract(
-            algo=algo, task_name=str(args.task), checkpoint_path=session[2], log=log
-        )
+        if OmegaConf.select(cfg, "oracle.identity") != "motion_quality_oracle_v1":
+            _warn_if_g1_sac_checkpoint_lacks_standing_contract(
+                algo=algo, task_name=str(args.task), checkpoint_path=session[2], log=log
+            )
         return session
     factories = {
         "hora_distill": create_hora_distill_playback_session,

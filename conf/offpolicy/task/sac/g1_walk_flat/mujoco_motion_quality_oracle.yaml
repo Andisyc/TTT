@@ -51,8 +51,8 @@ algo:
   save_interval: 240
   gamma: 0.99
   obs_normalization: true
-  use_symmetry: false
-  symmetry_mirror_loss_coeff: 0.0
+  use_symmetry: true
+  symmetry_mirror_loss_coeff: 0.1
   value_support_min: -30.0
   value_support_max: 30.0
   actor:
@@ -127,8 +127,8 @@ reward:
   gait_frequency: 1.0
   gait_period_randomization_width: 0.2
   tracking_sigma: 0.25
-  # Tighten yaw-rate tracking without changing linear-velocity tracking.
-  tracking_ang_sigma: 0.05
+  # Match the official yaw-rate tracking kernel (std=0.5, denominator=0.25).
+  tracking_ang_sigma: 0.25
   base_height_target: 0.78
   min_base_height: 0.3
   max_tilt_deg: 65.0

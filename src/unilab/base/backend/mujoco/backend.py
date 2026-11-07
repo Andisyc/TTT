@@ -392,6 +392,9 @@ class MuJoCoBackend(SimBackend):
             self._base_quat_view = np.broadcast_to(base_quat, (num_envs, 4)).copy()
             self._base_lin_vel_view = np.zeros((num_envs, 3), dtype=self._np_dtype)
             self._base_ang_vel_view = np.zeros((num_envs, 3), dtype=self._np_dtype)
+        self._base_ang_vel_world = np.empty_like(self._base_ang_vel_view)
+        self._base_ang_vel_cross = np.empty_like(self._base_ang_vel_view)
+        self._base_ang_vel_scratch = np.empty(num_envs, dtype=self._np_dtype)
 
         # Sensor indices.
         self._sensor_indices = {}
@@ -1377,7 +1380,27 @@ class MuJoCoBackend(SimBackend):
         return self._base_lin_vel_view
 
     def get_base_ang_vel(self) -> np.ndarray:
-        return self._base_ang_vel_view
+        # Free-joint qvel stores BODY angular velocity. Rotate without altering
+        # the physics state or allocating per-environment temporaries.
+        quat = self._base_quat_view
+        velocity = self._base_ang_vel_view
+        cross = self._base_ang_vel_cross
+        world = self._base_ang_vel_world
+        scratch = self._base_ang_vel_scratch
+        axes = ((0, 1, 2), (1, 2, 0), (2, 0, 1))
+        for i, j, k in axes:
+            np.multiply(quat[:, j + 1], velocity[:, k], out=cross[:, i])
+            np.multiply(quat[:, k + 1], velocity[:, j], out=scratch)
+            np.subtract(cross[:, i], scratch, out=cross[:, i])
+            np.multiply(cross[:, i], 2.0, out=cross[:, i])
+        for i, j, k in axes:
+            np.multiply(quat[:, 0], cross[:, i], out=world[:, i])
+            np.add(world[:, i], velocity[:, i], out=world[:, i])
+            np.multiply(quat[:, j + 1], cross[:, k], out=scratch)
+            np.add(world[:, i], scratch, out=world[:, i])
+            np.multiply(quat[:, k + 1], cross[:, j], out=scratch)
+            np.subtract(world[:, i], scratch, out=world[:, i])
+        return world
 
     # ------------------------------------------------------------------ #
     # DOF state                                                          #

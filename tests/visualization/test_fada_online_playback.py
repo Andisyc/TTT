@@ -706,6 +706,7 @@ def official_controller_inputs():
         "source_identity": source_identity, "joint_names": names,
         "default_joint_pos": defaults.tolist(), "action_scale": [0.25] * 29,
         "stiffness": [20.0] * 29, "damping": [0.5] * 29,
+        "sim_dt": 0.005,
         "clip_actions": 0.05, "ctrl_dt": 0.02, "gait_frequency": 1.5,
         "gait_clock_mode": "continuous", "phase_init": [0.0, float(np.pi)],
     }, source_identity=source_identity)

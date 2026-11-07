@@ -97,6 +97,10 @@ class NpEnv(ABEnv):
         """Return the backend-declared actuator joint order."""
         return tuple(self._backend.get_actuated_joint_names())
 
+    def get_actuator_gains(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return backend actuator gains in the declared joint order."""
+        return self._backend.get_actuator_gains()
+
     def set_step_measurement_callback(
         self, callback: Callable[[NpEnvState, np.ndarray | None], None] | None,
     ) -> None:

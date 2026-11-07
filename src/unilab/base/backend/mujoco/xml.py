@@ -82,16 +82,13 @@ def _mujoco_module() -> Any:
 
 
 def _materialize_spec_xml(spec, model_file: str) -> str:
-    fd, output_path = tempfile.mkstemp(
-        suffix=".xml", dir=os.path.dirname(os.path.abspath(model_file))
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(spec.to_xml())
-    except Exception:
-        os.close(fd)
-        raise
-    return output_path
+    xml = spec.to_xml()
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", suffix=".xml",
+        dir=os.path.dirname(os.path.abspath(model_file)), delete=False,
+    ) as output:
+        output.write(xml)
+        return output.name
 
 
 def _add_w_sensors(spec, valid_bnames: list[str]) -> None:

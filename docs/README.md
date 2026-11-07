@@ -64,19 +64,23 @@ tasks finish. MuJoCo fatal-error jump contexts are installed on the worker
 that calls MuJoCo, rather than on the dispatching thread.
 
 Build and check an opt-in overlay with the existing MuJoCo 3.8.0 environment,
-CMake, a C++17 compiler, and `patch`:
+CMake, a C++17 compiler, and `patch`. Linux additionally requires the wheel's
+Clang 20/libc++ toolchain (`CXX` and `--libcxx-root`); the builder refuses a
+GCC/libstdc++ fallback before downloading or building:
 
 ```bash
 uv run --frozen --no-sync python scripts/build_mujoco_lifecycle_overlay.py \
   --work-dir /tmp/unilab-mujoco-lifecycle
 ```
 
-The builder verifies the locked source SHA256, rebuilds the Python binding
-family together to avoid mixed C++ ABIs/unwinders, and exercises native failure,
-completion, output-lifetime, and serial-reference physics contracts. It leaves
-the installed extension unchanged and prints `VERIFIED_OVERLAY`. Only processes
-explicitly given that directory through `PYTHONPATH` use the patched bindings;
-removing that override returns to the installed package. No training is started.
+The builder verifies the locked source SHA256 and rebuilds the Python binding
+family with a compatible C++ ABI. It checks native lifecycle contracts, XML
+sensor export, and single-environment Oracle initialization/reset/close before
+printing `VERIFIED_OVERLAY`. The installed extension is unchanged. Only processes
+explicitly given the verified directory through `PYTHONPATH` use the patched
+bindings; removing that override returns to the installed package. No training
+or environment stepping is started. The earlier GCC `overlay-coherent` artifact
+fails XML export and must not be used for training.
 For offline builds, supply `--source-archive`, `--abseil-source`, `--eigen-source`,
 and `--pybind11-source` using the fixed source versions in the builder.
 Passing these checks verifies the repaired boundary, not elimination of an

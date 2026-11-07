@@ -18,7 +18,7 @@ class MotionQualityOracleRuntime(OffPolicyRuntime):
 
     learner_cls: type[Any] | None = MotionQualityOracleLearner
     algo_type: str | None = "hora_sac"
-    supports_symmetry: bool = False
+    supports_symmetry: bool = True
     actor_cfg: dict[str, Any] = field(default_factory=dict)
 
     def validate_training_config(self, cfg: Any) -> None:

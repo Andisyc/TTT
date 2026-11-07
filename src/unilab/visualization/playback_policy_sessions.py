@@ -446,6 +446,42 @@ def create_sac_playback_session(
     from unilab.algos.torch.offpolicy.worker import resolve_offpolicy_actor_priv_info
 
     device_name = default_device(torch, str(device) if device is not None else None)
+    if getattr(getattr(cfg, "oracle", None), "identity", None) == "motion_quality_oracle_v1":
+        from unilab.training.oracle.checkpoint import read_oracle_checkpoint
+        from unilab.training.oracle.playback import (
+            OracleInferencePolicy,
+            build_oracle_play_environment,
+        )
+
+        checkpoint = _resolve_task_checkpoint_from_playback_cfg(playback_cfg, cfg, root_dir)
+        if checkpoint is None:
+            raise FileNotFoundError("Oracle interactive playback requires a checkpoint.")
+        payload = read_oracle_checkpoint(checkpoint)
+        env, play_cfg = build_oracle_play_environment(
+            payload, cfg, num_envs=playback_cfg.num_envs, device=device_name,
+        )
+        try:
+            policy = OracleInferencePolicy(payload, env, str(play_cfg.training.device))
+        except BaseException:
+            env.close()
+            raise
+        log(f"Loading motion-quality Oracle checkpoint: {checkpoint}")
+        return (
+            OffPolicyPlaybackSession(
+                env=env,
+                device=str(play_cfg.training.device),
+                action_mode=playback_cfg.action_mode,
+                actor=policy.actor,
+                actor_algo_type="hora_sac",
+                normalizer=policy.normalizer,
+                num_envs=playback_cfg.num_envs,
+                obs_extractor=extract_play_obs,
+                priv_info_resolver=resolve_offpolicy_actor_priv_info,
+            ),
+            "actor",
+            str(checkpoint),
+        )
+
     env = env_factory(int(playback_cfg.num_envs))
     if env is None:
         raise RuntimeError("Playback env factory did not return an environment.")

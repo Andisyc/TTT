@@ -93,6 +93,7 @@ class OfficialFADAPlaybackProfile:
     stiffness: tuple[float, ...]
     damping: tuple[float, ...]
     clip_actions: float
+    sim_dt: float
     ctrl_dt: float
     gait_frequency: float
     gait_clock_mode: str
@@ -113,7 +114,7 @@ class OfficialFADAPlaybackProfile:
         if not isinstance(names, Sequence) or isinstance(names, (str, bytes)) or len(names) != 29 or len(set(names)) != 29 or not all(isinstance(name, str) and name for name in names):
             raise ValueError("official playback joint_names must contain 29 unique names")
         scalars = {}
-        for name in ("clip_actions", "ctrl_dt", "gait_frequency"):
+        for name in ("clip_actions", "sim_dt", "ctrl_dt", "gait_frequency"):
             value = payload[name]
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"official playback {name} must be positive and finite")

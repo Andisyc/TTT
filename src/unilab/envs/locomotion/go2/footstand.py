@@ -834,7 +834,10 @@ class Go2FootStandTask(Go2HandStandTask):
 
     def _cost_stay_still(self, ctx: RewardContext) -> np.ndarray:
         linvel = self._backend.get_base_lin_vel()
-        angvel = self._backend.get_base_ang_vel()
+        # Preserve the historical body-Z penalty across the world-frame API fix.
+        angvel = np_quat_apply_inverse(
+            self._backend.get_base_quat(), self._backend.get_base_ang_vel()
+        )
         return cast(np.ndarray, np.sum(np.square(linvel[:, :2]), axis=1) + np.square(angvel[:, 2]))
 
     def _cost_torques(self, ctx: RewardContext) -> np.ndarray:

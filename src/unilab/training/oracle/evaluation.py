@@ -23,7 +23,7 @@ from omegaconf import OmegaConf
 from scipy.spatial.transform import Rotation
 
 from unilab.algos.torch.distill.collection.transition import set_transition_input_rows
-from unilab.envs.common.rotation import np_quat_apply, np_quat_apply_inverse
+from unilab.envs.common.rotation import np_quat_apply_inverse
 from unilab.training import ensure_registries
 from unilab.training.oracle.checkpoint import read_oracle_checkpoint
 from unilab.training.oracle.playback import build_oracle_play_environment
@@ -47,20 +47,21 @@ PHYSICAL_COLUMNS = (
 
 
 def _base_measurements(env: Any) -> tuple[np.ndarray, np.ndarray]:
-    """Canonical MuJoCo free-root qvel is world-linear but BODY-angular."""
+    """Read world-frame velocities and explicitly derive body-frame columns."""
     position = env.get_base_pos()
     quaternion = env.get_base_quat()
     linear_world = env.get_base_lin_vel()
-    angular_body = env.get_base_ang_vel()
-    physical = np.concatenate((position, quaternion, linear_world, angular_body), axis=1)
+    angular_world = env.get_base_ang_vel()
+    physical = np.concatenate((position, quaternion, linear_world, angular_world), axis=1)
     valid = np.isfinite(physical).all(axis=1)
     values = np.full((env.num_envs, len(PHYSICAL_COLUMNS)), np.nan)
     if valid.any():
         quat = quaternion[valid]
         values[valid] = np.concatenate((
             position[valid], quat, linear_world[valid],
-            np_quat_apply(quat, angular_body[valid]),
-            np_quat_apply_inverse(quat, linear_world[valid]), angular_body[valid],
+            angular_world[valid],
+            np_quat_apply_inverse(quat, linear_world[valid]),
+            np_quat_apply_inverse(quat, angular_world[valid]),
             Rotation.from_quat(quat[:, [1, 2, 3, 0]]).as_euler("xyz"),
         ), axis=1)
     return values, valid
@@ -111,7 +112,7 @@ def evaluate_motion_quality_oracle(
         "online_updates": False, "payload_enabled": False, "record_video": record_video,
         "pose_source": "public env.get_base_* (base, not the actor torso gyro)",
         "quaternion_order": "wxyz; base orientation in world",
-        "angular_velocity_source": "MuJoCo free-joint qvel[3:6] in body frame; rotate once to world",
+        "angular_velocity_source": "public env.get_base_ang_vel in world frame; inverse-rotate once to body",
         "command_frame": "base/body vx, vy in m/s and yaw rate in rad/s",
         "row_timing": "action over [(step-1)*ctrl_dt, step*ctrl_dt]; post-step state",
         "termination_rule": "first terminated/truncated/invalid-physics row ends that case",
@@ -157,7 +158,9 @@ def evaluate_motion_quality_oracle(
             "joint_pos_rad": env.get_dof_pos(),
             "joint_vel_rad_s": env.get_dof_vel(),
             "base_lin_vel_world_m_s": env.get_base_lin_vel(),
-            "base_ang_vel_body_rad_s": env.get_base_ang_vel(),
+            "base_ang_vel_body_rad_s": np_quat_apply_inverse(
+                env.get_base_quat(), env.get_base_ang_vel(),
+            ),
         }
         for name, values in initial_state.items():
             if not np.allclose(values, values[:1], rtol=0.0, atol=1e-7):

@@ -81,8 +81,12 @@ def build_oracle_play_environment(
     play_cfg.training.play_only = True
     play_cfg.oracle.resume_checkpoint = None
     env_override = deepcopy(payload["metadata"]["environment_config"])
-    # Canonical G1 assets move with the installation; content/order checks remain mandatory.
-    env_override["scene"]["model_file"] = G1WalkEnvCfg().scene.model_file
+    # Relocate assets without weakening the checkpoint's content/order checks.
+    model_file = OmegaConf.select(cfg, "env.scene.model_file") if cfg is not None else None
+    env_override["scene"]["model_file"] = (
+        str(Path(model_file).expanduser().resolve())
+        if model_file is not None else G1WalkEnvCfg().scene.model_file
+    )
     adapter = BackendAdapter(play_cfg, root_dir=Path(__file__).parents[4], algo_name="sac")
     env_override = adapter.build_play_env_cfg_override(env_override)
     if env_patch is not None:

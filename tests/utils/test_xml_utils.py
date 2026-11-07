@@ -17,6 +17,21 @@ from unilab.base.backend import (
 )
 
 
+def test_xml_export_failure_preserves_original_error_without_creating_output(tmp_path):
+    from unilab.base.backend.mujoco.xml import _materialize_spec_xml
+
+    failure = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    class BrokenSpec:
+        def to_xml(self):
+            raise failure
+
+    with pytest.raises(UnicodeDecodeError) as caught:
+        _materialize_spec_xml(BrokenSpec(), str(tmp_path / "scene.xml"))
+    assert caught.value is failure
+    assert list(tmp_path.iterdir()) == []
+
+
 def _g1_scene() -> str:
     return str(ASSETS_ROOT_PATH / "robots" / "g1" / "scene_flat.xml")
 

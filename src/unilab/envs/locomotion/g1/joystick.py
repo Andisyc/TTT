@@ -153,7 +153,8 @@ class G1WalkEnv(
             backend_type != "mujoco"
             or cfg.scene.fragment_files
             or cfg.scene.terrain is not None
-            or epath.Path(cfg.scene.model_file).resolve() != (ASSETS_ROOT_PATH / "robots/g1/scene_flat.xml").resolve()
+            or epath.Path(cfg.scene.model_file).read_bytes()
+            != (ASSETS_ROOT_PATH / "robots/g1/scene_flat.xml").read_bytes()
         ):
             raise ValueError("motion-quality rewards require the canonical MuJoCo flat scene")
         if cfg.reward_config is None:
@@ -217,7 +218,7 @@ class G1WalkEnv(
             mujoco_num_threads=cfg.mujoco_num_threads,
             motrix_max_iterations=cfg.motrix_max_iterations,
             post_step_forward_sensor=cfg.post_step_forward_sensor,
-            position_actuator_gains=cfg.control_config.position_actuator_gains,
+            position_actuator_gains=getattr(cfg.control_config, "position_actuator_gains", None),
             **({"add_body_sensors": True, "reward_telemetry": True} if motion_quality else {}),
         )
         super().__init__(cfg, backend, num_envs)

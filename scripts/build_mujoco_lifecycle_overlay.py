@@ -60,12 +60,35 @@ def main() -> None:
     parser.add_argument("--eigen-source", type=Path)
     parser.add_argument("--pybind11-source", type=Path)
     parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--libcxx-root", type=Path)
     args = parser.parse_args()
     if not args.work_dir.is_absolute() or args.jobs < 1:
         parser.error("--work-dir must be absolute and --jobs must be positive")
     tools = {name: shutil.which(name) for name in ("cmake", "patch", "c++")}
     if not all(tools.values()):
         raise RuntimeError(f"missing build prerequisite: {tools}")
+    abi_configuration = []
+    if sys.platform.startswith("linux"):
+        clang = shutil.which(os.environ.get("CXX", "clang++"))
+        if clang is None or args.libcxx_root is None:
+            raise RuntimeError(
+                "Linux MuJoCo 3.8.0 bindings require the matching Clang 20/libc++ "
+                "toolchain: set CXX to clang++ and provide --libcxx-root. "
+                "Refusing a GCC/libstdc++ overlay; no build or install was started."
+            )
+        version = subprocess.check_output([clang, "--version"], text=True, timeout=10)
+        if "clang version 20." not in version:
+            raise RuntimeError("the locked Linux MuJoCo wheel requires Clang 20")
+        libcxx = args.libcxx_root.resolve()
+        required = ["include/c++/v1/string", "lib/libc++.a", "lib/libc++abi.a", "lib/libunwind.a"]
+        missing = [name for name in required if not (libcxx / name).is_file()]
+        if missing:
+            raise RuntimeError(f"incomplete libc++ toolchain at {libcxx}: {missing}")
+        abi_configuration = [
+            f"-DCMAKE_C_COMPILER={Path(clang).with_name('clang')}",
+            f"-DCMAKE_CXX_COMPILER={clang}", "-DMUJOCO_PYTHON_USE_LIBCXX=ON",
+            f"-DMUJOCO_PYTHON_LIBCXX_ROOT={libcxx}",
+        ]
     import mujoco
 
     if mujoco.__version__ != "3.8.0":
@@ -109,6 +132,7 @@ def main() -> None:
         f"-DMUJOCO_LIBRARY_DIR={package}", f"-DMUJOCO_INCLUDE_DIR={package / 'include'}",
         f"-DFETCHCONTENT_BASE_DIR={work / 'dependencies-build'}",
     ]
+    configure.extend(abi_configuration)
     configure.extend(f"-DFETCHCONTENT_SOURCE_DIR_{name}={path}" for name, path in dependencies.items())
     run(configure)
     # All imported bindings must use the same C++ ABI and exception unwinder.
@@ -150,6 +174,8 @@ def main() -> None:
     environment["PYTHONPATH"] = str(overlay) + os.pathsep + environment.get("PYTHONPATH", "")
     run([sys.executable, str(ROOT / "tests/native/mujoco_batch_lifecycle_smoke.py"),
          str(fault_library)], timeout=60, env=environment)
+    run([sys.executable, str(ROOT / "tests/native/mujoco_initialization_smoke.py"),
+         str(ROOT)], timeout=90, env=environment)
     if hashlib.sha256(original_extension.read_bytes()).hexdigest() != original_hash:
         raise RuntimeError("the original native extension changed during the isolated build")
     print(f"VERIFIED_OVERLAY={overlay}", flush=True)

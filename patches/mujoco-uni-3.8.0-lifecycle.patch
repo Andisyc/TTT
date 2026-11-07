@@ -1,6 +1,6 @@
 --- a/mujoco/batch_env.cc
 +++ b/mujoco/batch_env.cc
-@@ -24,11 +24,13 @@
+@@ -24,6 +24,7 @@
  // caller-supplied env_ids array.
  
  #include <algorithm>
@@ -8,13 +8,7 @@
  #include <cmath>
  #include <cstddef>
  #include <memory>
- #include <optional>
- #include <sstream>
-+#include <stdexcept>
- #include <string>
- #include <unordered_map>
- #include <utility>
-@@ -654,32 +656,31 @@
+@@ -654,32 +655,31 @@
                             int chunk_size, bool control_is_constant) {
    int nfulljobs = nbatch / chunk_size;
    int chunk_remainder = nbatch % chunk_size;
@@ -60,7 +54,7 @@
  }
  
  // Subset reset kernel. Iterates over env_ids[start, end), applies per-env
-@@ -759,32 +760,31 @@
+@@ -759,32 +759,31 @@
      int chunk_size) {
    int nfulljobs = n / chunk_size;
    int chunk_remainder = n % chunk_size;
@@ -102,7 +96,7 @@
  }
  
  // ===================================================================
-@@ -851,30 +851,29 @@
+@@ -851,30 +850,29 @@
                                     ThreadPool* pool, int chunk_size) {
    int nfulljobs = nbatch / chunk_size;
    int chunk_remainder = nbatch % chunk_size;
@@ -141,7 +135,7 @@
  }
  
  // Site-Jacobian kernel. Per env: setState, run kinematics + comPos prefix
-@@ -948,30 +947,29 @@
+@@ -948,30 +946,29 @@
                                  ThreadPool* pool, int chunk_size) {
    int nfulljobs = nbatch / chunk_size;
    int chunk_remainder = nbatch % chunk_size;
@@ -180,7 +174,7 @@
  }
  
  // Hfield bilinear sampling kernel. Per env: set full-physics state, run the
-@@ -1076,31 +1074,30 @@
+@@ -1076,31 +1073,30 @@
      ThreadPool* pool, int chunk_size) {
    int nfulljobs = nbatch / chunk_size;
    int chunk_remainder = nbatch % chunk_size;
@@ -218,7 +212,7 @@
  }
  
  mjtNum* optional_array_ptr(const std::optional<PyCArray>& arg, const char* name,
-@@ -1130,6 +1127,22 @@
+@@ -1130,6 +1126,23 @@
  // Pool.
  // ===================================================================
  
@@ -227,7 +221,8 @@
 + public:
 +  explicit PoolOperation(std::atomic_flag& active) : active_(active) {
 +    if (active_.test_and_set(std::memory_order_acquire)) {
-+      throw std::runtime_error("BatchEnvPool does not support overlapping operations");
++      PyErr_SetString(PyExc_RuntimeError, "BatchEnvPool does not support overlapping operations");
++      throw py::error_already_set();
 +    }
 +  }
 +  PoolOperation(const PoolOperation&) = delete;
@@ -474,3 +469,20 @@
  };
  
  }  // namespace mujoco::python
+--- a/mujoco/CMakeLists.txt
++++ b/mujoco/CMakeLists.txt
+@@ -61,8 +61,13 @@
+     )
+     set(
+       MUJOCO_PYTHON_LIBCXX_LINK_FLAGS
+-      "-stdlib=libc++ -nostdlib++ -pthread -Wl,--whole-archive ${MUJOCO_PYTHON_LIBCXX_ROOT}/lib/libc++.a ${MUJOCO_PYTHON_LIBCXX_ROOT}/lib/libc++abi.a ${MUJOCO_PYTHON_LIBCXX_ROOT}/lib/libunwind.a -Wl,--no-whole-archive -ldl"
++      "-stdlib=libc++ -nostdlib++ -pthread -Wl,--exclude-libs,libc++.a:libc++abi.a:libunwind.a"
+     )
++    # Runtime archives must follow object files; libc++.a may already include ABI objects.
++    set(
++      CMAKE_CXX_STANDARD_LIBRARIES
++      "${CMAKE_CXX_STANDARD_LIBRARIES} -Wl,--start-group ${MUJOCO_PYTHON_LIBCXX_ROOT}/lib/libc++.a ${MUJOCO_PYTHON_LIBCXX_ROOT}/lib/libc++abi.a ${MUJOCO_PYTHON_LIBCXX_ROOT}/lib/libunwind.a -Wl,--end-group -ldl"
++    )
+   endif()
+   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${MUJOCO_PYTHON_LIBCXX_COMPILE_FLAGS}")
+   set(CMAKE_MODULE_LINKER_FLAGS

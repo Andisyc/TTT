@@ -443,6 +443,8 @@ def create_fada_playback_session(
         task_name,
         enabled=playback_cfg.keyboard,
     )
+    if official_profile is not None:
+        env_cfg_override["sim_dt"] = official_profile.sim_dt
     if playback_cfg.keyboard:
         log("Keyboard playback reset: standing command with zero base velocity.")
     env = create_env(

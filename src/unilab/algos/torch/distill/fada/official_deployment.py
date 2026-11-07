@@ -79,6 +79,8 @@ class OfficialFADADeploymentAdapter:
             expected = np.asarray(expected)[target_from_source]
             if actual.shape != (29,) or not np.allclose(actual, expected, rtol=1e-6, atol=1e-7):
                 raise ValueError(f"official source/target {name} mismatch; select source-aligned PD configuration")
+        if not np.isclose(float(env.cfg.sim_dt), profile.sim_dt, rtol=1e-6, atol=1e-9):
+            raise ValueError("official source/target sim_dt mismatch")
         if not np.isclose(float(env.cfg.ctrl_dt), profile.ctrl_dt, rtol=1e-6, atol=1e-9):
             raise ValueError("official source/target ctrl_dt mismatch")
         if not np.isclose(float(env.cfg.reward_config.gait_frequency), profile.gait_frequency, rtol=1e-6, atol=1e-9):

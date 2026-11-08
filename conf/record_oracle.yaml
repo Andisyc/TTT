@@ -1,0 +1,53 @@
+# Oracle policy/control settings come from the checkpoint, not a task profile.
+# Keep the shared profile private: only demo/view defaults are projected below.
+defaults:
+  - /distill/recording_profile@_figure_eight_defaults: figure_eight
+  - _self_
+
+training:
+  play_checkpoint_path: ???
+  device: cpu
+
+env:
+  scene:
+    model_file: null
+  max_episode_seconds: ${_figure_eight_defaults.env.max_episode_seconds}
+
+demo:
+  figure_eight:
+    width_m: ${_figure_eight_defaults.demo.figure_eight.width_m}
+    height_m: ${_figure_eight_defaults.demo.figure_eight.height_m}
+    speed_m_s: ${_figure_eight_defaults.demo.figure_eight.speed_m_s}
+    segment_duration_s: ${_figure_eight_defaults.demo.figure_eight.segment_duration_s}
+  footprints:
+    enabled: ${_figure_eight_defaults.demo.footprints.enabled}
+  rendering:
+    enabled: ${_figure_eight_defaults.demo.rendering.enabled}
+
+interactive:
+  use_env_visual_model: true
+  camera_follow_body: ${_figure_eight_defaults.interactive.camera_follow_body}
+  camera_focus_body_name: ${_figure_eight_defaults.interactive.camera_focus_body_name}
+  camera_distance: ${_figure_eight_defaults.interactive.camera_distance}
+  camera_elevation: ${_figure_eight_defaults.interactive.camera_elevation}
+  camera_azimuth: ${_figure_eight_defaults.interactive.camera_azimuth}
+  camera_height_offset: 0.15
+
+video_recording:
+  output_path: logs/oracle/figure_eight_${now:%Y%m%d-%H%M%S-%f}.mp4
+  duration_s: ${_figure_eight_defaults.video_recording.duration_s}
+  fps: 30
+  width: 1280
+  height: 720
+  progress_interval_s: 1.0
+  show_status_overlay: ${_figure_eight_defaults.video_recording.show_status_overlay}
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false
+  job_logging:
+    root:
+      handlers: [console]

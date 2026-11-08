@@ -422,6 +422,46 @@ ICE-Cal/
 `symmetry_mirror_loss_coeff=0.1`，转向跟踪误差分母 `tracking_ang_sigma=0.25` 与官方奖励宽度一致。
 站立、指令分布、弱域随机化及其余奖励保持原设置；已有 checkpoint 仍按其保存配置读取。
 
+Oracle 八字回放会话由 `src/unilab/visualization/oracle_recording.py` 的
+`create_oracle_recording_session()` 创建：恢复 checkpoint 的控制接口和冻结归一化，
+调用方依次使用 `reset()`、`step_once()`，并在 `finally` 中 `close()`。
+会话在首次终止或超时后停止；显式 reset 会清空八字进度和足迹。
+会话已通过 `record_fada_playback(..., policy_kind="oracle")` 接入共享录制器：
+首次终止会输出末帧并结束，日志报告实际步数、仿真时长和帧数，画面显示 Oracle 身份而非 LoRA 信息。
+默认 `policy_kind="fada"` 保持原行为。独立录制入口是 `scripts/record_oracle.py`，
+配置入口是 `conf/record_oracle.yaml`：只借用共享八字 profile 的轨迹和镜头默认值，
+不注入 FADA 的任务配置或在线适应设置。
+
+服务器上录制新 Oracle checkpoint 的 120 秒八字视频：
+
+```bash
+cd /ssd1/cyx/TTT
+REC_DIR="$PWD/logs/oracle/figure_eight_$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$REC_DIR"
+
+nohup env \
+  LD_PRELOAD=/lib/x86_64-linux-gnu/libgcc_s.so.1 \
+  MUJOCO_GL=egl \
+  OMP_NUM_THREADS=1 \
+  PYTHONUNBUFFERED=1 \
+  PYTHONFAULTHANDLER=1 \
+  uv run --frozen --no-sync python scripts/record_oracle.py \
+  training.play_checkpoint_path=/ssd1/cyx/TTT/logs/oracle/mirror_yaw025_50k_20261108-054124/model_50000.pt \
+  training.device=cpu \
+  video_recording.duration_s=120 \
+  video_recording.output_path="$REC_DIR/figure_eight.mp4" \
+  > "$REC_DIR/record.log" 2>&1 &
+
+echo "录制进程 PID: $!"
+echo "视频：$REC_DIR/figure_eight.mp4"
+echo "日志：$REC_DIR/record.log"
+```
+
+省略 `video_recording.duration_s` 时默认只录一个完整八字；首次终止或超时仍会提前结束。
+推理默认使用 CPU，Linux 离屏渲染默认使用 EGL。跨机器搬运 checkpoint 时，
+可用 `env.scene.model_file=/绝对路径/scene_flat.xml` 显式指定配套场景资源，
+资产身份校验仍然保留。
+
 以下链路对应当前仓库中可直接执行的 v022 Source Oracle：配置入口为
 `mujoco_fada_source.yaml`，实现是 privileged SAC，Checkpoint 使用 sealed lineage 契约。
 

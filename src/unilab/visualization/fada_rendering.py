@@ -1,11 +1,12 @@
-"""Shared MuJoCo camera, scene decorations and status for FADA playback."""
+"""Shared MuJoCo camera, decorations and status for FADA and Oracle playback."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 from numbers import Integral
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 import mujoco
 import numpy as np
@@ -57,7 +58,15 @@ class FADAPlaybackRendering:
     def __init__(
         self, session: Any, model: Any, args: Any,
         config: FADADemoRenderConfig | None = None,
+        *, policy_kind: Literal["fada", "oracle"] = "fada",
     ) -> None:
+        if policy_kind not in ("fada", "oracle"):
+            raise ValueError("policy_kind must be 'fada' or 'oracle'")
+        self.policy_kind = policy_kind
+        if policy_kind == "oracle":
+            checkpoint = Path(session.checkpoint_path)
+            self._checkpoint_label = f"{checkpoint.parent.name}/{checkpoint.name}"
+            self._checkpoint_iteration = session.checkpoint_identity["iteration"]
         self.session, self.model, self.args = session, model, args
         self.config = config or FADADemoRenderConfig()
         self.focus_body_id = _resolve_focus_body_id(model, session.env, args.camera_focus_body_name)
@@ -141,14 +150,15 @@ class FADAPlaybackRendering:
 
     def observe_step(self) -> None:
         """Update display counters exactly once after a successful control step."""
-        stats = self.session.last_update_stats
-        if stats is not None:
-            self.update_count += 1
-            self.last_loss = float(stats["loss"])
-        state = self.session.env.state
-        if bool(state.terminated[0] or state.truncated[0]):
-            self.reset_count += 1
-            self.last_reset_time = self.elapsed_s
+        if self.policy_kind == "fada":
+            stats = self.session.last_update_stats
+            if stats is not None:
+                self.update_count += 1
+                self.last_loss = float(stats["loss"])
+            state = self.session.env.state
+            if bool(state.terminated[0] or state.truncated[0]):
+                self.reset_count += 1
+                self.last_reset_time = self.elapsed_s
         if bool(np.asarray(self.session.info.get("runtime_payload_attached_this_step", [False])).reshape(-1)[0]):
             self.last_attach_time = self.elapsed_s
 
@@ -214,12 +224,19 @@ class FADAPlaybackRendering:
         c, s = math.cos(self.origin_yaw), math.sin(self.origin_yaw)
         yaw = float(np_yaw_from_quat(data.xquat[self.focus_body_id:self.focus_body_id + 1])[0])
         yaw_error = math.degrees(float(np_wrap_to_pi(yaw - self.origin_yaw)))
-        loss = f" loss={self.last_loss:.4g}" if self.last_loss is not None else ""
         details = [
             f"forward={c * delta[0] + s * delta[1]:+.2f}m lateral={-s * delta[0] + c * delta[1]:+.2f}m",
-            f"yaw error={yaw_error:+.1f}deg resets={self.reset_count}",
-            f"LoRA updates={self.update_count}{loss}",
         ]
+        if self.policy_kind == "oracle":
+            details.insert(0, f"checkpoint={self._checkpoint_label} iteration={self._checkpoint_iteration}")
+            state = self.session.termination_reason if self.session.finished else "running"
+            details.append(f"heading change={yaw_error:+.1f}deg state={state}")
+        else:
+            loss = f" loss={self.last_loss:.4g}" if self.last_loss is not None else ""
+            details.extend((
+                f"yaw error={yaw_error:+.1f}deg resets={self.reset_count}",
+                f"LoRA updates={self.update_count}{loss}",
+            ))
         if self.config.enabled:
             program = getattr(self.session, "command_program", None)
             if program is not None:
@@ -235,4 +252,9 @@ class FADAPlaybackRendering:
         if self.last_reset_time is not None and self.elapsed_s - self.last_reset_time < 2.0:
             reset = "RESET" if self.session.autoreset_enabled else "TERMINATED"
             alert = f"EPISODE {reset} - trajectory interrupted"
-        return FADAFrameStatus(f"t={self.elapsed_s:.2f}s | {payload}", tuple(details), alert, active)
+        if self.policy_kind == "oracle" and self.session.finished:
+            alert = f"EPISODE {self.session.termination_reason.upper()}"
+        title = f"t={self.elapsed_s:.2f}s | {payload}"
+        if self.policy_kind == "oracle":
+            title = f"ORACLE | {title}"
+        return FADAFrameStatus(title, tuple(details), alert, active)

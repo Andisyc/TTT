@@ -1,4 +1,4 @@
-"""Finite, offscreen video recording of the official online FADA session."""
+"""Finite, offscreen video recording for FADA and frozen Oracle sessions."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import mediapy as media
 import mujoco
@@ -118,6 +118,7 @@ def record_fada_playback(
     config: FADAVideoRecordingConfig,
     *,
     render_config: FADADemoRenderConfig | None = None,
+    policy_kind: Literal["fada", "oracle"] = "fada",
     log: Callable[[str], None] = partial(print, flush=True),
 ) -> str:
     """Advance simulation without wall-clock pacing and stream frames to FFmpeg.
@@ -127,6 +128,11 @@ def record_fada_playback(
     Progress is flushed at completed-step boundaries on a wall-clock interval;
     a single long-running adaptation step cannot report completion until it returns.
     """
+    if policy_kind not in ("fada", "oracle"):
+        raise ValueError("policy_kind must be 'fada' or 'oracle'")
+    is_oracle = policy_kind == "oracle"
+    if is_oracle and session.autoreset_enabled:
+        raise ValueError("Oracle recording requires autoreset=False")
     timing = resolve_fada_recording_timing(session, config)
     ctrl_dt = float(session.env.cfg.ctrl_dt)
     duration_s = timing.duration_s
@@ -140,22 +146,32 @@ def record_fada_playback(
     data = mujoco.MjData(model)
     camera = mujoco.MjvCamera()
     session.reset()
-    rendering = FADAPlaybackRendering(session, model, args, render_config)
+    rendering = FADAPlaybackRendering(
+        session, model, args, render_config, policy_kind=policy_kind,
+    )
     rendering.initialize_camera(camera)
     font = (
         ImageFont.load_default(size=max(12, config.height // 40))
         if config.show_status_overlay else None
     )
     log(f"Recording {duration_s:g}s simulation to {output} ({config.width}x{config.height}, {config.fps} fps); no viewer or realtime pacing")
+    if is_oracle:
+        log(
+            f"Oracle checkpoint: {session.checkpoint_path} "
+            f"(iteration={session.checkpoint_identity['iteration']})"
+        )
     frame_index = 0
+    actual_steps = 0
+    end_reason = "completed"
     started = time.monotonic()
     last_progress = started
 
     def report_progress(step: int, now: float) -> None:
+        frames = f"{frame_index}" if is_oracle else f"{frame_index}/{num_frames}"
         log(
             f"Progress: step={step}/{num_steps} ({100.0 * step / num_steps:.1f}%) "
             f"sim_time={step * ctrl_dt:.2f}/{duration_s:g}s "
-            f"frames={frame_index}/{num_frames} wall_time={now - started:.1f}s"
+            f"frames={frames} wall_time={now - started:.1f}s"
         )
 
     report_progress(0, started)
@@ -164,23 +180,30 @@ def record_fada_playback(
             for step_index in range(num_steps + 1):
                 if step_index:
                     session.step_once()
+                    actual_steps = step_index
                     rendering.observe_step()
-                    if session.last_update_stats is not None:
+                    if not is_oracle and session.last_update_stats is not None:
                         log(f"sim_time={step_index * ctrl_dt:.3f}s Update: {session.last_update_stats}")
                     if np.any(session.info.get("runtime_payload_attached_this_step", False)):
                         log(f"sim_time={step_index * ctrl_dt:.3f}s Payload attached: {session.info['runtime_payload_added_mass_kg']} kg")
 
                     state = session.env.state
                     assert state is not None
-                    if np.any(state.terminated | state.truncated):
+                    if not is_oracle and np.any(state.terminated | state.truncated):
                         reason = "terminated" if np.any(state.terminated) else "timeout"
                         log(
                             f"sim_time={step_index * ctrl_dt:.3f}s EPISODE {'RESET' if session.autoreset_enabled else 'TERMINATED'} ({reason}); "
                             f"reset_count={rendering.reset_count}. Do not treat the trajectory as uninterrupted walking."
                         )
+                stopped = is_oracle and session.finished
+                if stopped:
+                    end_reason = session.termination_reason
                 elapsed = step_index * ctrl_dt
                 final_frame = timing.include_terminal_frame and step_index == num_steps
-                if frame_index < num_frames and (frame_index / config.fps <= elapsed + 1e-9 or final_frame):
+                oracle_final = is_oracle and (stopped or step_index == num_steps)
+                frame_due = frame_index / config.fps <= elapsed + 1e-9
+                if ((is_oracle and (frame_due or oracle_final))
+                        or (not is_oracle and frame_index < num_frames and (frame_due or final_frame))):
                     rendering.sync_physics(data)
                     rendering.update_camera(camera, data)
                     renderer.update_scene(data, camera=camera)
@@ -192,16 +215,34 @@ def record_fada_playback(
                             image, title=status.title, details=status.details,
                             alert=status.alert, loaded=status.loaded, font=font,
                         )
-                    while frame_index < num_frames and (frame_index / config.fps <= elapsed + 1e-9 or final_frame):
-                        writer.add_image(image)
-                        frame_index += 1
+                    if is_oracle:
+                        previous_frame_index = frame_index
+                        while frame_index / config.fps <= elapsed + 1e-9:
+                            writer.add_image(image)
+                            frame_index += 1
+                        # Preserve an off-grid final state, without filling the
+                        # remaining planned duration with copies of that frame.
+                        if oracle_final and frame_index == previous_frame_index:
+                            writer.add_image(image)
+                            frame_index += 1
+                    else:
+                        while frame_index < num_frames and (frame_index / config.fps <= elapsed + 1e-9 or final_frame):
+                            writer.add_image(image)
+                            frame_index += 1
 
                 now = time.monotonic()
-                if now - last_progress >= config.progress_interval_s or step_index == num_steps:
+                if now - last_progress >= config.progress_interval_s or step_index == num_steps or stopped:
                     report_progress(step_index, now)
                     last_progress = now
+                if stopped:
+                    break
 
             log("Finalizing MP4 encoding...")
 
-    log(f"Video saved: {output} ({frame_index} frames, {num_steps} control steps)")
+    if is_oracle:
+        log(
+            f"Recording ended: reason={end_reason} actual_steps={actual_steps} "
+            f"actual_sim_time={actual_steps * ctrl_dt:.3f}s frames={frame_index}"
+        )
+    log(f"Video saved: {output} ({frame_index} frames, {actual_steps} control steps)")
     return str(output)

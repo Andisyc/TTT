@@ -22,9 +22,9 @@ class FigureEightCommandProgram:
     """Repeat a closed Gerono eight using constant body-frame circular arcs.
 
     Geometry is sampled once at construction. The first quarter is resampled
-    by arc length; reflection supplies the other quarters. Circular arcs fit
-    each chord exactly, so integrating the actual velocity table closes both
-    position and heading. The entire route is rotated to start along +x.
+    by arc length; analytic tangents keep its turns in one direction. A small
+    speed correction closes the quarter, and reflection supplies the rest.
+    Reference points integrate these arcs, closing both position and heading.
     Episode-local progress belongs to the playback session, not this table.
     """
 
@@ -59,20 +59,36 @@ class FigureEightCommandProgram:
         # At least eight arcs per quarter keep even a tiny route an eight.
         count = max(8, int(ceil(arc_length[-1] / (config.speed_m_s * segment_dt))))
         distances = np.linspace(0.0, arc_length[-1], count + 1)
-        points = np.column_stack([np.interp(distances, arc_length, dense[:, i]) for i in range(2)])
+        sampled_parameter = np.interp(distances, arc_length, parameter)
+        points = np.column_stack((
+            a * np.sin(sampled_parameter),
+            b * np.sin(sampled_parameter) * np.cos(sampled_parameter),
+        ))
+        points[[0, -1], 1] = 0.0
         chords = np.diff(points, axis=0)
         chord_length = np.linalg.norm(chords, axis=1)
-        chord_heading = np.unwrap(np.arctan2(chords[:, 1], chords[:, 0]))
-        heading = np.empty(count + 1)
+        heading = np.arctan2(
+            b * np.cos(2.0 * sampled_parameter), a * np.cos(sampled_parameter),
+        )
         heading[-1] = -np.pi / 2.0
-        # A constant-twist arc's chord points along its mean boundary heading.
-        # Fit backwards from the vertical tangent at the quarter endpoint.
-        for index in range(count - 1, -1, -1):
-            heading[index] = 2.0 * chord_heading[index] - heading[index + 1]
         turn = np.diff(heading)
         if np.any(chord_length <= 0.0) or np.any(np.abs(turn) >= np.pi):
             raise ValueError("figure-eight arcs are under-resolved; reduce segment_duration_s")
-        velocity = chord_length / (segment_dt * np.sinc(turn / (2.0 * np.pi)))
+        arc_factor = segment_dt * np.sinc(turn / (2.0 * np.pi))
+        velocity = chord_length / arc_factor
+        mean_heading = (heading[:-1] + heading[1:]) / 2.0
+        displacement = arc_factor[:, None] * np.column_stack((
+            np.cos(mean_heading), np.sin(mean_heading),
+        ))
+        # Preserve analytic turn directions while fitting the quarter endpoint.
+        # This is a two-constraint least-norm correction, computed only at init.
+        target = np.array([a, 0.0])
+        velocity += displacement @ np.linalg.solve(
+            displacement.T @ displacement,
+            target - displacement.T @ velocity,
+        )
+        points = np.vstack((np.zeros(2), np.cumsum(displacement * velocity[:, None], axis=0)))
+        points[-1] = target
         yaw = turn / segment_dt
         commands = np.column_stack((
             np.concatenate((velocity, velocity[::-1], velocity, velocity[::-1])),
@@ -111,44 +127,116 @@ class FigureEightCommandProgram:
 
     def validate_environment(self, env_cfg: Any, *, keyboard: bool) -> None:
         """Reject competing command owners and canonicalization that changes the route."""
-        if keyboard:
-            raise ValueError("demo.figure_eight requires interactive.keyboard=false")
-        command_cfg = env_cfg.commands
-        if float(command_cfg.resampling_time) != 0.0:
-            raise ValueError("demo.figure_eight requires env.commands.resampling_time=0.0")
-        if bool(command_cfg.heading_command):
-            raise ValueError("demo.figure_eight requires env.commands.heading_command=false")
-        limits = np.asarray(command_cfg.vel_limit, dtype=np.float64)
-        if (limits.shape != (2, 3) or not np.isfinite(limits).all()
-                or np.any(limits[0] > limits[1])):
-            raise ValueError("env.commands.vel_limit must contain ordered finite 3D bounds")
-        if np.any(self.commands < limits[0]) or np.any(self.commands > limits[1]):
-            raise ValueError(
-                "demo.figure_eight commands exceed env.commands.vel_limit: "
-                f"required min={self.commands.min(axis=0)}, max={self.commands.max(axis=0)}"
-            )
-        # Use the command owner's pure functions, including its joint XY/yaw
-        # dead zone (which does not zero yaw independently).
-        from unilab.envs.locomotion.g1.walk_commands import (
-            apply_g1_command_dead_zone,
-            canonicalize_g1_commands,
-        )
-        from unilab.envs.locomotion.common.commands import zero_small_xy_commands
+        _validate_demo_commands(self.commands, env_cfg, keyboard=keyboard)
 
-        phase_cfg = getattr(env_cfg, "command_gated_phase_contact", None)
-        if phase_cfg is not None and bool(phase_cfg.enabled):
-            canonical = canonicalize_g1_commands(
-                self.commands, xy_dead_zone=phase_cfg.command_xy_dead_zone,
-                yaw_dead_zone=phase_cfg.command_yaw_dead_zone,
-            )
-        else:
-            canonical = apply_g1_command_dead_zone(self.commands.copy(), command_cfg)
-            threshold = float(getattr(command_cfg, "small_xy_threshold", 0.0))
-            if threshold > 0.0:
-                canonical = canonical.copy()
-                zero_small_xy_commands(canonical, threshold=threshold)
-        if not np.allclose(canonical, self.commands, rtol=1e-6, atol=1e-9):
-            raise ValueError(
-                "demo.figure_eight commands are altered by env command dead zones / "
-                "small_xy_threshold; reduce the applicable thresholds"
-            )
+
+@dataclass(frozen=True)
+class DoubleCircleCommandConfig:
+    forward_m_s: float
+    yaw_rate_rad_s: float
+    right_duration_s: float
+    left_duration_s: float
+
+
+class DoubleCircleCommandProgram:
+    """Two fixed commands with measured hold times, not a feedback controller.
+
+    The reference depicts two desired complete circles. Measured policy response,
+    rather than ideal integration of the input commands, determines hold times.
+    """
+
+    commands: np.ndarray
+    reference_points: np.ndarray
+    ctrl_dt: float
+    phase_steps: tuple[int, int]
+    total_control_steps: int
+    duration_s: float
+
+    @classmethod
+    def from_config(
+        cls, config: DoubleCircleCommandConfig, *, ctrl_dt: float,
+    ) -> DoubleCircleCommandProgram:
+        for name in ("forward_m_s", "yaw_rate_rad_s", "right_duration_s", "left_duration_s"):
+            value = float(getattr(config, name))
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError(f"demo.double_circle.{name} must be finite and positive")
+        if not np.isfinite(ctrl_dt) or ctrl_dt <= 0.0:
+            raise ValueError("double-circle ctrl_dt must be finite and positive")
+        speed, yaw_rate = float(config.forward_m_s), float(config.yaw_rate_rad_s)
+        program = cls()
+        program.ctrl_dt = float(ctrl_dt)
+        program.phase_steps = (
+            max(1, int(ceil(config.right_duration_s / ctrl_dt - 1e-10))),
+            max(1, int(ceil(config.left_duration_s / ctrl_dt - 1e-10))),
+        )
+        program.total_control_steps = sum(program.phase_steps)
+        program.duration_s = program.total_control_steps * program.ctrl_dt
+        program.commands = np.array([[speed, 0.0, -yaw_rate], [speed, 0.0, yaw_rate]])
+        angle = np.linspace(0.0, 2.0 * np.pi, 129)
+        radius = speed / yaw_rate
+        right = radius * np.column_stack((np.sin(angle), np.cos(angle) - 1.0))
+        left = radius * np.column_stack((np.sin(angle), 1.0 - np.cos(angle)))
+        right[[0, -1]] = 0.0
+        left[[0, -1]] = 0.0
+        program.reference_points = np.vstack((right, left[1:]))
+        program.commands.setflags(write=False)
+        program.reference_points.setflags(write=False)
+        return program
+
+    def segment_index_at_control_step(self, control_step: int) -> int:
+        if isinstance(control_step, bool) or not isinstance(control_step, Integral) or control_step < 0:
+            raise ValueError("double-circle control_step must be a non-negative integer")
+        return int(int(control_step) % self.total_control_steps >= self.phase_steps[0])
+
+    def command_at_control_step(self, control_step: int) -> np.ndarray:
+        return self.commands[self.segment_index_at_control_step(control_step)].copy()
+
+    def time_at_control_step(self, control_step: int) -> float:
+        self.segment_index_at_control_step(control_step)
+        return int(control_step) * self.ctrl_dt
+
+    def validate_environment(self, env_cfg: Any, *, keyboard: bool) -> None:
+        _validate_demo_commands(self.commands, env_cfg, keyboard=keyboard)
+
+
+def _validate_demo_commands(commands: np.ndarray, env_cfg: Any, *, keyboard: bool) -> None:
+    """Keep both demo programs subject to the same command-owner contract."""
+    if keyboard:
+        raise ValueError("demo velocity commands require interactive.keyboard=false")
+    command_cfg = env_cfg.commands
+    if float(command_cfg.resampling_time) != 0.0:
+        raise ValueError("demo velocity commands require env.commands.resampling_time=0.0")
+    if bool(command_cfg.heading_command):
+        raise ValueError("demo velocity commands require env.commands.heading_command=false")
+    limits = np.asarray(command_cfg.vel_limit, dtype=np.float64)
+    if (limits.shape != (2, 3) or not np.isfinite(limits).all()
+            or np.any(limits[0] > limits[1])):
+        raise ValueError("env.commands.vel_limit must contain ordered finite 3D bounds")
+    if np.any(commands < limits[0]) or np.any(commands > limits[1]):
+        raise ValueError(
+            "demo velocity commands exceed env.commands.vel_limit: "
+            f"required min={commands.min(axis=0)}, max={commands.max(axis=0)}"
+        )
+    from unilab.envs.locomotion.g1.walk_commands import (
+        apply_g1_command_dead_zone,
+        canonicalize_g1_commands,
+    )
+    from unilab.envs.locomotion.common.commands import zero_small_xy_commands
+
+    phase_cfg = getattr(env_cfg, "command_gated_phase_contact", None)
+    if phase_cfg is not None and bool(phase_cfg.enabled):
+        canonical = canonicalize_g1_commands(
+            commands, xy_dead_zone=phase_cfg.command_xy_dead_zone,
+            yaw_dead_zone=phase_cfg.command_yaw_dead_zone,
+        )
+    else:
+        canonical = apply_g1_command_dead_zone(commands.copy(), command_cfg)
+        threshold = float(getattr(command_cfg, "small_xy_threshold", 0.0))
+        if threshold > 0.0:
+            canonical = canonical.copy()
+            zero_small_xy_commands(canonical, threshold=threshold)
+    if not np.allclose(canonical, commands, rtol=1e-6, atol=1e-9):
+        raise ValueError(
+            "demo velocity commands are altered by env command dead zones / "
+            "small_xy_threshold; reduce the applicable thresholds"
+        )

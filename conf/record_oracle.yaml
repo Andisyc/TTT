@@ -14,11 +14,13 @@ env:
   max_episode_seconds: ${_figure_eight_defaults.env.max_episode_seconds}
 
 demo:
-  figure_eight:
-    width_m: ${_figure_eight_defaults.demo.figure_eight.width_m}
-    height_m: ${_figure_eight_defaults.demo.figure_eight.height_m}
-    speed_m_s: ${_figure_eight_defaults.demo.figure_eight.speed_m_s}
-    segment_duration_s: ${_figure_eight_defaults.demo.figure_eight.segment_duration_s}
+  double_circle:
+    forward_m_s: 0.3
+    yaw_rate_rad_s: 0.3
+    # model/mirror/model_50000.pt, nominal MuJoCo, sim_dt=1/150, ctrl_dt=0.02.
+    # Fixed-turn measurement includes starting and right-to-left transients.
+    right_duration_s: 27.18
+    left_duration_s: 26.38
   footprints:
     enabled: ${_figure_eight_defaults.demo.footprints.enabled}
   rendering:

@@ -7,6 +7,7 @@ from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
 
+from unilab.algos.torch.distill.fada.oracle_workflow import run_oracle_fada_training
 from unilab.algos.torch.distill.fada.persistent_workflow import run_fada_persistent_async
 from unilab.algos.torch.distill.fada.workflow_setup import (
     FADAWorkflowDependencies,
@@ -21,7 +22,10 @@ def run_fada_training_owner(
     teacher_checkpoint: str | Path | None = None,
     dependencies: FADAWorkflowDependencies,
 ) -> dict[str, Any]:
-    """Resolve the official contract before constructing a model or native worker."""
+    """Dispatch explicitly separated official and native Oracle source routes."""
+
+    if OmegaConf.select(cfg, "training.fada.source_route") == "unilab_oracle":
+        return run_oracle_fada_training(cfg, teacher_checkpoint=teacher_checkpoint)
 
     spec, model_config, device, output_dir, timeout = resolve_official_fada_setup(
         cfg, teacher_checkpoint=teacher_checkpoint

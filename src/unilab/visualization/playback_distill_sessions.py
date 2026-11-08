@@ -386,6 +386,7 @@ def create_fada_playback_session(
     architecture = None
     official_profile = None
     official_adapter = None
+    oracle_source_profile = None
     if playback_cfg.action_mode == "policy":
         if checkpoint is None or not Path(checkpoint).is_file():
             raise FileNotFoundError(
@@ -405,6 +406,10 @@ def create_fada_playback_session(
             )
         else:
             architecture = loaded.policy.config
+            from unilab.algos.torch.distill.fada.oracle_deployment import oracle_student_source_profile
+            oracle_source_profile = oracle_student_source_profile(
+                loaded.checkpoint, observation_contract=architecture.observation_contract,
+            )
 
         if online is not None:
             from unilab.algos.torch.distill.fada.observation import (
@@ -432,8 +437,16 @@ def create_fada_playback_session(
     task_name = str(getattr(cfg.training, "task_name", playback_cfg.task))
     if official_profile is not None and task_name != "G1WalkFlat":
         raise ValueError("official Locomotion playback requires task=g1_walk_flat/mujoco")
-    build_env_cfg_override = resolved_deps.get("build_env_cfg_override")
-    env_cfg_override = build_env_cfg_override(cfg) if build_env_cfg_override is not None else {}
+    if oracle_source_profile is not None:
+        from unilab.algos.torch.distill.fada.oracle_deployment import build_oracle_student_play_env_cfg
+        if task_name != "G1WalkFlat":
+            raise ValueError("Oracle student playback requires task=g1_walk_flat/mujoco")
+        env_cfg_override = build_oracle_student_play_env_cfg(
+            oracle_source_profile, cfg, root_dir=root_dir,
+        )
+    else:
+        build_env_cfg_override = resolved_deps.get("build_env_cfg_override")
+        env_cfg_override = build_env_cfg_override(cfg) if build_env_cfg_override is not None else {}
     env_cfg_override = _apply_keyboard_playback_reset_contract(
         env_cfg_override,
         task_name,
@@ -455,6 +468,10 @@ def create_fada_playback_session(
     wrapped_env = None
     recorder = None
     try:
+        if oracle_source_profile is not None:
+            from unilab.algos.torch.distill.fada.oracle_deployment import validate_oracle_student_environment
+            validate_oracle_student_environment(oracle_source_profile, env)
+            log(f"Oracle student source controls: sim_dt={env.cfg.sim_dt}, ctrl_dt={env.cfg.ctrl_dt}")
         command_program = None
         demo = getattr(getattr(cfg, "demo", None), "figure_eight", None)
         if demo is not None and bool(getattr(demo, "enabled", False)):

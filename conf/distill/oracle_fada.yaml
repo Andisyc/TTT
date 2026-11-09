@@ -1,0 +1,40 @@
+# Oracle-owned physics and observations; native UniLab Planner-IDM training.
+defaults:
+  - config
+  - override task: g1_walk_flat/mujoco
+  - _self_
+
+teacher:
+  checkpoint_path: null
+
+student:
+  model_type: planner_idm
+  obs_dim: 66
+  action_dim: 29
+
+interactive:
+  action_mode: policy
+
+training:
+  device: cuda
+  fada:
+    enabled: true
+    source_route: unilab_oracle
+    scene_model_file: null
+    training_schedule: alternating_idm_then_planner
+    # A single final Oracle works without an intermediate checkpoint campaign.
+    # Enable the existing paper source contract with 20 explicit checkpoint paths.
+    paper_source_enabled: false
+    oracle_shadow_enabled: true
+    intermediate_oracle_checkpoint_paths: []
+    stand_transition_curriculum:
+      enabled: false
+    v005_replay:
+      enabled: false
+    checkpoint_path: logs/fada/oracle/${now:%Y%m%d_%H%M%S}/student.pt
+    async_artifact_dir: logs/fada/oracle/${now:%Y%m%d_%H%M%S}/source_batches
+    save_every_iter: 1
+
+hydra:
+  job:
+    chdir: false

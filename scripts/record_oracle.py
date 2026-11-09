@@ -1,4 +1,4 @@
-"""Record a frozen motion-quality SAC Oracle following figure-eight commands."""
+"""Record a frozen motion-quality SAC Oracle following a fixed double circle."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ if str(SRC_DIR) not in sys.path:
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from unilab.visualization.demo_commands import FigureEightCommandConfig
+from unilab.visualization.demo_commands import DoubleCircleCommandConfig
 from unilab.visualization.fada_recording import FADAVideoRecordingConfig, record_fada_playback
 from unilab.visualization.fada_rendering import FADADemoRenderConfig
 from unilab.visualization.oracle_recording import create_oracle_recording_session
@@ -27,8 +27,8 @@ from unilab.visualization.oracle_recording import create_oracle_recording_sessio
 @hydra.main(version_base="1.3", config_path="../conf", config_name="record_oracle")
 def main(cfg: DictConfig) -> None:
     checkpoint_path = cfg.training.play_checkpoint_path
-    figure_eight = FigureEightCommandConfig(**cast(
-        dict[str, Any], OmegaConf.to_container(cfg.demo.figure_eight, resolve=True),
+    double_circle = DoubleCircleCommandConfig(**cast(
+        dict[str, Any], OmegaConf.to_container(cfg.demo.double_circle, resolve=True),
     ))
     recording = FADAVideoRecordingConfig(**cast(
         dict[str, Any], OmegaConf.to_container(cfg.video_recording, resolve=True),
@@ -38,7 +38,7 @@ def main(cfg: DictConfig) -> None:
     ))
     session = create_oracle_recording_session(
         checkpoint_path,
-        figure_eight=figure_eight,
+        double_circle=double_circle,
         device=str(cfg.training.device),
         scene_model_file=cfg.env.scene.model_file,
         max_episode_seconds=float(cfg.env.max_episode_seconds),

@@ -275,6 +275,8 @@ class PersistentDistillationRuntime:
             if self._runner is not None:
                 self._runner.close()
         finally:
+            # Runner callbacks retain this runtime; release the cycle deterministically.
+            self._runner = None
             if self._weight_sync is not None:
                 self._weight_sync.cleanup()
                 self._weight_sync = None

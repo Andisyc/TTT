@@ -7,6 +7,7 @@ import os
 import signal
 import sys
 from abc import ABC, abstractmethod
+from multiprocessing.queues import Queue
 from typing import Any, Callable
 
 from unilab.ipc.collector_error import (
@@ -199,6 +200,7 @@ class AsyncRunner(ABC):
         self._signal_collector_group(signal.SIGKILL)
 
         if self._collector_process is not None:
+            self._collector_process.join(timeout=0)
             exitcode = getattr(self._collector_process, "exitcode", None)
             # -15 (SIGTERM) is expected during normal close()
             if exitcode is not None and exitcode != 0 and exitcode != -15:
@@ -208,12 +210,21 @@ class AsyncRunner(ABC):
                     file=sys.stderr,
                     flush=True,
                 )
+            self._collector_process.close()
+            self._collector_process = None
 
+        cleanup_errors: list[BaseException] = []
         for resource in self._shared_resources:
-            if hasattr(resource, "cleanup"):
-                resource.cleanup()
-            elif hasattr(resource, "close"):
-                resource.close()
+            try:
+                if hasattr(resource, "cleanup"):
+                    resource.cleanup()
+                elif hasattr(resource, "close"):
+                    resource.close()
+                if isinstance(resource, Queue):
+                    resource.join_thread()
+            except BaseException as error:
+                cleanup_errors.append(error)
+        self._shared_resources.clear()
 
         if self._error_recv is not None:
             try:
@@ -227,6 +238,11 @@ class AsyncRunner(ABC):
             except Exception:
                 pass
             self._error_send = None
+
+        if cleanup_errors:
+            for error in cleanup_errors[1:]:
+                print(f"[AsyncRunner] Additional cleanup failure: {error!r}", file=sys.stderr)
+            raise cleanup_errors[0]
 
     def __del__(self):
         try:

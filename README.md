@@ -422,17 +422,91 @@ ICE-Cal/
 `symmetry_mirror_loss_coeff=0.1`，转向跟踪误差分母 `tracking_ang_sigma=0.25` 与官方奖励宽度一致。
 站立、指令分布、弱域随机化及其余奖励保持原设置；已有 checkpoint 仍按其保存配置读取。
 
-Oracle 八字回放会话由 `src/unilab/visualization/oracle_recording.py` 的
+Oracle 蒸馏源适配器位于 `src/unilab/algos/torch/distill/fada/oracle_source.py`：
+`build_oracle_fada_source()` 接收 checkpoint、环境数、设备和可选场景路径，
+返回 `(env, frozen_teacher, source_profile)`。它保留源环境和随机化，不应用播放 profile；
+教师权重与归一化冻结，资产迁移仍校验内容和关节顺序。
+返回的环境尚未初始化、重置或步进；调用方应先准备需要的隔离分支，再初始化，
+并在 `finally` 中关闭环境。构建失败由适配器关闭已创建的环境。
+`source_profile` 为可序列化的 `unilab_oracle` v1 数据，包含教师身份、权重哈希、
+源环境及控制契约和 `g1_fada_state_v2` 学生观测契约，由采集产物携带，不单独保存为 profile 文件。
+
+Oracle 批量采集入口是 `src/unilab/algos/torch/distill/fada/oracle_runtime.py` 的
+`build_oracle_fada_runtime()`，接收蒸馏配置、66/29/3 架构、最终 Oracle、初始学生、
+可选中间 Oracle 窗口分配及场景路径。当前 owner 为 `G1WalkFlat/mujoco`，
+要求 `training.fada.oracle_shadow_enabled=true`。
+先调用 `prepare(DaggerPrepareRequest)` 获取 `metadata.source_profile`；
+准备进程只构建环境和隔离分支，随后关闭，不初始化或步进物理。
+再用 `activate_checkpoint(path, state_dict=student.state_dict())` 发布学生权重；
+该路径是版本身份，不要求预先存在学生 checkpoint。
+`collect(DaggerCollectRequest)` 使用原生窗口采集器和请求级进程，最终 Oracle 提供影子参考，
+中间 Oracle 或学生可控制实际轨迹；教师权重和两类归一化统计始终冻结。
+产物及结果均携带源 profile，窗口和旧原生源格式保持一致。
+父进程读取产物后先调用 `identity_fields()` 校验行字段，再通过
+`FADAReplayBuffer.add_artifact()` 入库；最后关闭运行时。
+关闭路径会显式 join/close 采集进程并等待自有队列 feeder 退出，不依赖垃圾回收释放句柄。
+共享权重由创建者负责 unlink；导出视图阻止句柄关闭时，`cleanup()` 仍移除共享内存名称并传播错误，
+调用方释放视图后可重试关闭句柄。附加进程的 `close()` 不移除创建者的名称。
+原生训练入口为 `scripts/train_distill.py --config-name oracle_fada`，
+`teacher.checkpoint_path` 指定最终 Oracle，`training.fada.scene_model_file` 可重定位同内容场景。
+默认使用最终 Oracle；设置 `training.fada.paper_source_enabled=true` 时沿用现有
+20 个中间 checkpoint、2:1 次优窗口预算契约。学生保存完整的
+`runtime_config.source_profile` 及两个优化器状态；不改变官方 PPO 蒸馏入口。
+
+学生回放和在线适应复用 `scripts/play_fada_online.py --config-name oracle_fada`。
+回放在建环境前恢复内嵌源配置，不读取原 Oracle 文件，也不要求官方学生的外置 profile；
+原有旧学生和官方学生分支保持不变。录制的指令、噪声、DR、负重、时长和 reset 设置仍可覆盖，
+源物理步长、控制周期、PD、动作缩放、相位时钟及观测/关节顺序必须匹配。
+跨机器时用 `training.fada.scene_model_file` 指向同内容场景文件及其配套资产。
+
+下面以 `model/mirror/model_50000.pt` 及现有本地配套资产为例，输出到一个新的训练目录：
+
+```bash
+uv run --frozen --no-sync python scripts/train_distill.py --config-name oracle_fada \
+  teacher.checkpoint_path=model/mirror/model_50000.pt \
+  training.fada.scene_model_file=model/straight_mix_50k_assets/g1/scene_flat.xml \
+  training.fada.checkpoint_path=logs/fada/oracle_demo/student.pt \
+  training.fada.async_artifact_dir=logs/fada/oracle_demo/source_batches
+```
+
+Linux 服务器录制该次训练得到的学生，立即挂载 3 kg 负重并启用 FADA-TTT：
+
+```bash
+env LD_PRELOAD=/lib/x86_64-linux-gnu/libgcc_s.so.1 MUJOCO_GL=egl \
+  PYTHONUNBUFFERED=1 PYTHONPATH="$PWD/src" \
+  uv run --frozen --no-sync python scripts/play_fada_online.py --config-name oracle_fada \
+  recording_profile=straight_payload \
+  training.play_checkpoint_path=logs/fada/oracle_demo/student.pt \
+  training.fada.scene_model_file=model/straight_mix_50k_assets/g1/scene_flat.xml \
+  env.runtime_payload.attach_time_s=0.0 \
+  online_adaptation.mode=fada_ttt online_adaptation.sigma=0 \
+  video_recording.duration_s=30 video_recording.output_path=video/oracle_student_ttt.mp4
+```
+
+默认训练/录制设备为 CUDA；本地 CPU 使用 `training.device=cpu`，macOS 不使用上述 Linux 环境前缀。
+原来的 `trajectory_base`（OAT）参数未改；FADA-TTT 明确指定 `mode=fada_ttt`、`sigma=0`。
+关闭在线适应可设 `online_adaptation.enabled=false`；八字录制改为 `recording_profile=figure_eight`。
+
+
+Oracle 双圆八字回放会话由 `src/unilab/visualization/oracle_recording.py` 的
 `create_oracle_recording_session()` 创建：恢复 checkpoint 的控制接口和冻结归一化，
 调用方依次使用 `reset()`、`step_once()`，并在 `finally` 中 `close()`。
-会话在首次终止或超时后停止；显式 reset 会清空八字进度和足迹。
+会话在首次终止或超时后停止；显式 reset 会清空双圆进度和足迹。
 会话已通过 `record_fada_playback(..., policy_kind="oracle")` 接入共享录制器：
 首次终止会输出末帧并结束，日志报告实际步数、仿真时长和帧数，画面显示 Oracle 身份而非 LoRA 信息。
 默认 `policy_kind="fada"` 保持原行为。独立录制入口是 `scripts/record_oracle.py`，
-配置入口是 `conf/record_oracle.yaml`：只借用共享八字 profile 的轨迹和镜头默认值，
-不注入 FADA 的任务配置或在线适应设置。
+配置入口是 `conf/record_oracle.yaml`：只借用共享八字 profile 的镜头和显示默认值，
+不注入 FADA 的任务配置或在线适应设置，轨迹来自独立的 `demo.double_circle` 固定指令。
 
-服务器上录制新 Oracle checkpoint 的 120 秒八字视频：
+Oracle 默认先右转一整圈，再左转一整圈，不使用路径跟踪或在线调参。
+针对本地 `model/mirror/model_50000.pt` 的无负重 MuJoCo 测量，前进指令固定为
+`0.3 m/s`，右转 `-0.3 rad/s` 保持 `27.18 s`，左转 `+0.3 rad/s` 保持 `26.38 s`，
+一组双圆共 `53.56 s`。时长已计入起转和右转切左转的过渡，并对齐 `ctrl_dt=0.02 s`。
+这些是该 checkpoint 的固定时长，不是其他策略或真机的通用标定值。
+灰色参考线为半径 `1 m` 的两个完整圆，不再显示 Gerono 曲线；
+FADA 的原 Gerono 发生器保持不变。录制仍按固定时间推进，没有位置反馈纠偏。
+
+服务器上录制新 Oracle checkpoint 的一组完整双圆八字：
 
 ```bash
 cd /ssd1/cyx/TTT
@@ -448,7 +522,7 @@ nohup env \
   uv run --frozen --no-sync python scripts/record_oracle.py \
   training.play_checkpoint_path=/ssd1/cyx/TTT/logs/oracle/mirror_yaw025_50k_20261108-054124/model_50000.pt \
   training.device=cpu \
-  video_recording.duration_s=120 \
+  video_recording.duration_s=null \
   video_recording.output_path="$REC_DIR/figure_eight.mp4" \
   > "$REC_DIR/record.log" 2>&1 &
 
@@ -457,7 +531,7 @@ echo "视频：$REC_DIR/figure_eight.mp4"
 echo "日志：$REC_DIR/record.log"
 ```
 
-省略 `video_recording.duration_s` 时默认只录一个完整八字；首次终止或超时仍会提前结束。
+省略 `video_recording.duration_s` 或设为 `null` 时默认只录一组完整双圆；首次终止或超时仍会提前结束。
 推理默认使用 CPU，Linux 离屏渲染默认使用 EGL。跨机器搬运 checkpoint 时，
 可用 `env.scene.model_file=/绝对路径/scene_flat.xml` 显式指定配套场景资源，
 资产身份校验仍然保留。

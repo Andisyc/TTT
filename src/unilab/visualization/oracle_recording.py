@@ -1,4 +1,4 @@
-"""Frozen Oracle figure-eight sessions; video encoding belongs to the recorder."""
+"""Frozen Oracle fixed double-circle sessions; video encoding belongs to the recorder."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from unilab.training import ensure_registries
 from unilab.training.offpolicy.playback import extract_play_obs
 from unilab.training.oracle.checkpoint import read_oracle_checkpoint
 from unilab.training.oracle.playback import OracleInferencePolicy, build_oracle_play_environment
-from unilab.visualization.demo_commands import FigureEightCommandConfig, FigureEightCommandProgram
+from unilab.visualization.demo_commands import DoubleCircleCommandConfig, DoubleCircleCommandProgram
 from unilab.visualization.footprints import FootprintRecorder
 from unilab.visualization.playback_sessions import OffPolicyPlaybackSession
 
@@ -29,7 +29,7 @@ class OracleRecordingSession(OffPolicyPlaybackSession):
         policy: OracleInferencePolicy,
         checkpoint_path: Path,
         checkpoint_identity: dict[str, Any],
-        command_program: FigureEightCommandProgram,
+        command_program: DoubleCircleCommandProgram,
         footprint_recorder: FootprintRecorder | None = None,
     ) -> None:
         if env.num_envs != 1:
@@ -105,7 +105,7 @@ class OracleRecordingSession(OffPolicyPlaybackSession):
 def create_oracle_recording_session(
     checkpoint_path: str | Path,
     *,
-    figure_eight: FigureEightCommandConfig,
+    double_circle: DoubleCircleCommandConfig,
     device: str = "cpu",
     scene_model_file: str | Path | None = None,
     max_episode_seconds: float = 180.0,
@@ -171,8 +171,8 @@ def create_oracle_recording_session(
     )
     try:
         policy = OracleInferencePolicy(payload, env, device)
-        program = FigureEightCommandProgram.from_config(
-            figure_eight, ctrl_dt=float(env.cfg.ctrl_dt),
+        program = DoubleCircleCommandProgram.from_config(
+            double_circle, ctrl_dt=float(env.cfg.ctrl_dt),
         )
         program.validate_environment(env.cfg, keyboard=False)
         footprint_recorder = (

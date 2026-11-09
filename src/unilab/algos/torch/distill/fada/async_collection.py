@@ -5,7 +5,7 @@ import os
 import time
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import Any, ContextManager, Literal, Protocol, cast
+from typing import Any, ContextManager, Literal, Mapping, Protocol, cast
 
 import torch
 
@@ -165,6 +165,8 @@ def _collect_fada_iteration(
     worker: FADAAsyncCollectorState,
     request: DaggerCollectRequest,
     artifact_writer: FADAShardedSourceWriter,
+    *,
+    source_profile: Mapping[str, Any] | None = None,
 ) -> DaggerCollectResult:
     """在一个 weight-version barrier 内产出完整 scenario source artifact.
 
@@ -274,19 +276,19 @@ def _collect_fada_iteration(
     # One resident intermediate Oracle is reused across all source identities. Checkpoint
     # payloads stay CPU-owned and only their weights cross into the resident device model.
     for source_path, source_windows in worker.source_allocations:
-        intermediate = getattr(worker, "intermediate_teacher", None)
-        current_source = getattr(worker, "intermediate_teacher_checkpoint", None)
-        if intermediate is None:
-            intermediate = worker._intermediate_teacher_loader(
-                source_path,
-                worker.teacher_spec,
-                device=worker.device,
-            )
-            worker.intermediate_teacher = intermediate
-        elif current_source != source_path:
-            worker._intermediate_teacher_reloader(intermediate, source_path, worker.teacher_spec)
-        worker.intermediate_teacher_checkpoint = source_path
         with worker.collection_environment() as source_env:
+            intermediate = getattr(worker, "intermediate_teacher", None)
+            current_source = getattr(worker, "intermediate_teacher_checkpoint", None)
+            if intermediate is None:
+                intermediate = worker._intermediate_teacher_loader(
+                    source_path,
+                    worker.teacher_spec,
+                    device=worker.device,
+                )
+                worker.intermediate_teacher = intermediate
+            elif current_source != source_path:
+                worker._intermediate_teacher_reloader(intermediate, source_path, worker.teacher_spec)
+            worker.intermediate_teacher_checkpoint = source_path
             collection = collect_fada_source_windows(
                 source_env,
                 teacher_policy=worker.final_teacher,
@@ -312,6 +314,7 @@ def _collect_fada_iteration(
     # B3: 原子提交只引用已落盘 shards 的 manifest, 不再构造 iteration 级大 tensor.
     collected = time.perf_counter()
     producer_pid = os.getpid()
+    source_metadata = {} if source_profile is None else {"source_profile": dict(source_profile)}
     artifact_writer.commit(
         metadata={
             "iteration": request.iteration,
@@ -326,6 +329,7 @@ def _collect_fada_iteration(
             "v005_replay_enabled": v005_enabled,
             "scenario_allocations": dict(allocations),
             "collections": summaries,
+            **source_metadata,
         },
     )
     written = time.perf_counter()
@@ -348,6 +352,7 @@ def _collect_fada_iteration(
             "main_windows": main_windows,
             "scenario_allocations": dict(allocations),
             "physics_guard_trips": float(getattr(worker, "physics_guard_trip_count", 0)),
+            **source_metadata,
         },
     )
 
@@ -355,6 +360,8 @@ def _collect_fada_iteration(
 def collect_fada_iteration(
     worker: FADAAsyncCollectorState,
     request: DaggerCollectRequest,
+    *,
+    source_profile: Mapping[str, Any] | None = None,
 ) -> DaggerCollectResult:
     """Collect one transaction with deterministic shard cleanup on every exit."""
 
@@ -363,4 +370,4 @@ def collect_fada_iteration(
         config=worker.config,
         replace_existing=True,
     ) as writer:
-        return _collect_fada_iteration(worker, request, writer)
+        return _collect_fada_iteration(worker, request, writer, source_profile=source_profile)

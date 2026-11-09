@@ -150,3 +150,19 @@ def test_persistent_distillation_runtime_rejects_checkpoint_shape_drift_before_p
         assert runtime.weight_version == 1
     finally:
         runtime.close()
+
+
+def test_closed_runtime_is_released_without_cyclic_gc(tmp_path: Path) -> None:
+    import weakref
+
+    runtime = PersistentDistillationRuntime(
+        student_loader=_load_linear_checkpoint,
+        worker_factory=_build_resident_linear_worker,
+    )
+    runtime.activate_checkpoint(
+        tmp_path / "unwritten.pt", state_dict={"weight": torch.ones(1, 2)},
+    )
+    reference = weakref.ref(runtime)
+    runtime.close()
+    del runtime
+    assert reference() is None

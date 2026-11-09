@@ -1,5 +1,22 @@
 # Current task
 
+Goal: 使用官方公开 G1 PPO Oracle，经 TTT 正式 official_fada 链路训练 IDM 与 Planner，保留官方网络、学习和采集语义。
+Do not: 不重训 Oracle，不用旧 v024/66维学生替代官方权重，不改研究方法、生产算法或原实验；不将启动/短链路通过写成收敛或策略质量通过。
+
+Latest delivery (2026-10-31, 用户授权完成 sim2sim):
+- 已将最终 `student_iter_0030.pt` 接入正式 TTT MuJoCo session/recorder。选择 `task=g1_walk_flat/mujoco_fada_official`，绑定原 run 的 `acceptance/student_source_profile.json`；200 Hz 仿真、50 Hz 控制、1 Hz 连续相位，按关节名在模型初始化/materialization 时绑定全精度 PD，保持源动作目标映射和站立相位语义。普通 task 的原始 XML PD/时步零步核对通过，未更改共享机器人 XML。
+- 修复 G1 三个公开转发接口，以及 MuJoCo backend 误将身体坐标 free-joint angular qvel 作为世界角速度返回的缺陷。零步 yaw=90° 对照证明原接口令官方 adapter 发生重复反旋转；修复后唯一新增回归 `test_mujoco_base_angular_velocity_matches_world_object_velocity` 对照真实 `mj_objectVelocity` 的三个姿态通过（1 passed，0.22 s），不修改物理状态。
+- 有界结果：修复角速度前的直行 20 s/1000 步未终止，vx/vy/wz RMSE=0.11581/0.10845/0.08999；首轮八字在 6.94 s 跌倒，原视频/轨迹/日志留在 `sim2sim/body_frame_failure/`。仅修复角速度后，同权重/seed=42/4×2 m/.3 m/s 八字完整 41.6 s/2080 步通过，无终止/重置，观测/动作有限；RMSE=0.08645/0.10918/0.08469，109 个真实落脚点，回到起点误差 0.63590 m。是开环速度指令 demo，不宣称精确轨迹跟踪或多 seed 鲁棒性。
+- 证据/视频/已解析配置：正式 run 的 `sim2sim/`（本地已同步）；`figure_eight.py` 仅为调用正式 factory/recorder 的固定 seed 有界观测脚本。首轮直行脚本因清理误调用 session.close 未保存指标，保留日志并修正为 wrapped_env.close 后补跑；本轮含该段最多 88.54 agent-seconds。未重训、改权重、执行全套测试、创建分支或提交/推送 Git。
+
+Current identity:
+- 正式续训：`/ssd1/cyx/TTT/logs/fada/official/20261030-g1-idm-planner-fast-vNmpNY`；日志 `train.log`，tmux `ttt-fada-g1-official-fast`，启动器 `.tmp/official_fada/run_training_resume_vectorized.sh <run_dir> <checkpoint> <previous_root>`。
+- 恢复来源：`/ssd1/cyx/TTT/logs/fada/official/20261030-g1-idm-planner-8HIivb/20261030_130149_443804_g1_official_full/checkpoints/student_iter_0009.pt`，9/30轮、11000更新，online replay为同目录`online_buffer_0010_iter_0009.npz`。原run是用户授权SIGINT停止，exit 130；Runner及shadow已退出，原日志/checkpoint保留。
+- 原生短链路：`/ssd1/cyx/TTT/logs/fada/official/20261030-native-probe-CGCdFh`，exit 0；optimal/suboptimal/online 各1024条 raw transition，两组 learner 各4次 optimizer step，保存官方 schema v2 的64/29/7、H30/K6学生。
+- 官方产物：`AngchenXie/fada-checkpoints` 的完整251个G1 checkpoint（约2.01 GB），逐文件校验SHA-256；最终 `model_24999.pt` SHA `97faea45885c71825f37fff8669604af1aed25500050fbc9c2866d0e03ef4261`，原始配置内嵌于checkpoint。
+- 运行环境：`.tmp/official_fada/runtime-pinned`，优先使用原bydmic的Python3.11/IsaacSim5.1/Torch2.7.0+cu128/NumPy1.26.0；缺包装在独立overlay，TTT已有发行包仅作末尾路径回退。原两个环境未修改；较早被中止的 `.tmp/official_fada/runtime` 不用于训练。
+- 正式配置：`--config-name official_fada`，只将环境数设为256并采用180秒shadow超时；保留batch4096、warmup2000、DAgger30轮/每轮1000更新及20个弱checkpoint来源。CPU限定0–27、BLAS/OpenMP各4线程、GPU0；性能计时开启，不宣称加速。
+- 当前任务状态（2026-10-31）：正式训练 exit 0，累计30轮/32000更新；最终checkpoint严格恢复与有限性通过。原生学生/Oracle同初态直行各20秒通过，学生vx RMSE 0.08158m/s，Oracle 0.03794m/s。MuJoCo原接口阻塞及转弯角速度坐标系错误已修复，最终学生完成固定 seed 的 41.6 秒整圈八字。原验收保留于 acceptance/，后续迁移证据在 sim2sim/；原生与跨后端结论分别记录。
 Goal: 将官方 FADA 的 G1 Locomotion Oracle→Planner–IDM 源训练接入 TTT，复用 UniLab 的进程/调度基础设施，产物可供现有播放与在线适应使用；接通后测量并优化吞吐。
 Do not: 本地实现与CPU验收已交付，不自动连接服务器、下载/安装、运行原生仿真/GPU训练或benchmark，不操作Git/机器人。保留模型/loss/采样与更新量、strict-shadow、最新策略和checkpoint/cache契约；不新增AMP/compile或policy lag。未经用户服务器正确性与同工作量性能证据，不关闭整体原生/加速验收，不以CPU结果宣称GPU倍率。
 
@@ -12,7 +29,8 @@ Current identity:
 
 Confirmed decisions:
 - 用户范围：仅接 Locomotion；采用 workflow-governance 轻量记录、system-engineering 总体路线、engineering-plan 逐步细化，Multi Agent 分担独立切片。
-- 最新执行边界：用户明确“不连接服务器，在本地完成代码构建，后续我亲自上传至服务器验证代码正确性”。原生验收及性能测量由用户执行；已有本地代码交付不因服务器证据待补而重复实施。
+- 最新执行边界（2026-10-30 用户授权）：已明确要求连接服务器、寻找公开原始 policy 并开始官方 IDM/Planner 训练；替代此前仅本地接入阶段的服务器禁令。授权不扩展到重训 Oracle、真机、改方法或覆盖原结果。
+- 最新续训授权（2026-10-30）：用户明确要求在已保存checkpoint上恢复启动。已部署仅Replay批量组窗优化（`replay.py`及`official_replay_sampling.py`），不改采样量/源比例/学习规则。原parent Replay备份`.tmp/official_fada/replay-optimized/replay.before.py`，无Git提交/推送。现有schema v2不保存完整RNG/仿真现场，恢复是轮次边界续训，不宣称逐步随机轨迹一致。
 - 整合边界：官方负责网络/数据/学习语义；UniLab 负责唯一训练入口、任务/进程生命周期和权重交接。不引入第二个完整训练主循环或另一套通信协议。
 - 源仿真先保持官方环境和 Oracle 条件。优先把官方采集包装成现有 `DaggerCollectorService` worker；不先移植为 MuJoCo，不伪装成已有 UniLab backend。部署端与源训练端分别校准。
 - 当前本地 persistent_async 路径是“等采集→训练→发新权重”，已有子进程不等于采学重叠。先保留轮次语义，性能优化不得悄悄引入陈旧策略采集。
@@ -94,6 +112,25 @@ Progress:
   - Evidence：主Agent统一CPU场景3项PASS（本轮终端）：非单位缩放/非零默认角/关节重排/相位、原生前向与不可变快照；正式session完整K步成熟、实际LoRA-only更新、Planner/base不变及reset保留Adam；旧schema2播放/更新和官方format分流、缺失/错配profile在创建env前拒绝。首次场景发现partial reset泄漏上个episode动作，修复后同场景通过。诊断transition不是物理仿真；临时脚本/模型已清理。
   - Done when / Depends on：代码实施无需重做；完整验收仍需第1步真实官方权重/run配置绑定、第4步相关原生前置和运行授权，再通过正式session关闭/开启更新的真实短运行。当前不宣称sim2sim、负重效果或加速。
 
+<<<<<<< HEAD
+- [ ] 6. 测量并实现有依据的训练提速（6A完成；6B–6D待运行前置及实测）。
+  - **目标 / Preserve**：在相同硬件、官方checkpoint/初始学生、配置、env/rollout/batch/更新量、source比例、strict-label、采样顺序/seed、cache状态与权重版本条件下衡量端到端吞吐。区分官方原生→TTT的整合收益与TTT改前→改后的优化收益；不把不同工作量或缓存命中当算法加速。
+  - [x] **6A 测量接线**：新增轻量`fada/timing.py`复用已有StageObservationAccumulator；`workflow.py`与`conf/distill/official_fada.yaml`提供默认关闭的`training.fada.performance.enabled`，不进入原生算法配置/缓存/checkpoint。`persistent_workflow.py`汇总worker耗时，计量初始化、RPC、artifact/Replay、batch、学习、保存/发布和close；`replay.py`记录原始sample与H2D。结果在warmup/每轮/close后由现有日志输出，最终返回performance，无新进度/报告/哈希体系。
+  - [x] **6A Multi Agent**：主Agent先落地共享计时接口，再并行A采集端（`fada/async_runtime.py`、`official_source_runtime.py`、`official_source_collection.py`）和B学习端（`official_learning.py`）。A计量资源初始化、已完成的rollout/CPU打包，并保留原metrics；B计量IDM→Planner前向/反向/optimizer。主Agent集成Replay、配置、正式外循环与统一验证；未设review席位，子Agent仅做局部编译/AST检查。
+  - [x] **6A唯一离线Evidence**：`PYTHONPATH=src OMP_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 uv run --frozen --no-sync python /tmp/ttt-fada-timing-1793242829867/verify.py`一次运行PASS。计时OFF/ON经过正式owner/factory、真实resident worker prepare/collect、采集事务/打包、raw v8、固定官方原始NumPy Replay、真实Torch learner、checkpoint及SharedWeightSync；仅native资源bootstrap替换为明确CPU诊断数据生产者，不冒充PPO/物理仿真。warmup+两轮DAgger共3次更新、128条online transition，模型/两AdamW/loss/RNG/持久化轨迹/发布版本逐项相同，collector平面metrics、实际计数与close后汇总通过。临时源码/诊断文件清除，不新增永久测试或报告。
+  - **6A口径**：默认关闭时不创建timer/CUDA event、不新增tensor或取CPU标量；开启时CUDA event只在报告边界统一解析，原生worker只报已完成事务wall time。parent RPC/worker/rollout属于包络与子阶段，不重复相加；未测阶段不填零。累计输出区分raw transition、sample window与update；total_elapsed覆盖训练owner初始化至close，不含此前CLI/Python导入。原生GPU计时尚未验证，CPU诊断耗时不当成吞吐基线。
+  - **本轮局部优化与已授权恢复（2026-10-30）**：原运行实测每轮采集约144秒、batch构造161秒（其中原sample约150秒）、learner约232秒；只将官方逐样本组窗替换为NumPy批量索引，继续使用官方有效锚点/cache/np.random.choice。一次离线对照222组覆盖逐字节输出、RNG、冷启动/reset、fallback/strict、尾部、K1、FIFO/random eviction、clear/load/split；Mac上128000转移/batch4096稳态组窗48.6ms→14.5ms（3.36倍局部，不是端到端或GPU收益）。恢复启动唯一核验：新进程发布的完整checkpoint与原9轮checkpoint递归精确一致，两组AdamW分别80/42状态均为11000步；实际第10轮已开始。尚未取得恢复后首个完整轮次的端到端计时，不宣称官方对照完成。
+  - **6B 有界基线测量（主Agent；依赖6A、4+5验收前置及运行授权）**：使用固定版本官方原生入口作为reference，和当前TTT正式入口串行运行同一已核准工作量；不改官方训练主循环、不在TTT建立第二条正式训练路线。执行前固定具体设备、预算、初始模型/optimizer、env数、horizon、warmup/DAgger更新量、cache与日志开关及独立输出目录；分别记录冷启动、稳态、实际transition/update/source配额、版本与阶段占比。该TTT结果作为后续候选的改前基线，不重跑已取得基线。Done when：能够指出哪个阶段实际主导端到端时间及收益上限；没有官方原生对照时不能声称相比官方加速。
+  - **6C 条件式Multi Agent优化（依赖6B，测到后才冻结具体工程小包）**：只对有实测占比的独立热点派工。候选A拥有`official_source_collection.py`/`official_source_runtime.py`/`source_artifact.py`的采集打包或I/O冗余；候选B拥有`replay.py`/`official_learning.py`的staging/复制或学习同步冗余。公共schema、正式入口、checkpoint/Runner发布及共享buffer均由主Agent单写；若热点只在一侧就只派一位，若热点耦合就合并，不为填团队而派工。A/B开始前必须冻结实测问题、精确符号、输入/输出、独占文件和等价性判据；两者不依赖对方未来产物且主Agent有集成工作时才同批派出。子Agent不跑GPU性能任务、测试套件或review，不再派助手。本轮不预选compile/AMP/关闭shadow/缩减样本或更新、跨轮prefetch/采学重叠；后两者涉及版本/RNG语义时单独决定。
+  - **6D 集成与对照（主Agent；依赖已接纳6C）**：按改动边界统一做一个近端等价场景，核对原始trajectory/样本顺序、mask/source配额、loss与梯度/optimizer更新、checkpoint恢复及下一轮发布版本，不默认重跑全套。再在同一GPU串行执行一次候选固定工作量，与6B既有基线比较端到端时间、phase占比及吞吐；不能只报局部kernel改善。GPU比较由主Agent独占资源，模型协议/RNG和数值容差在选定优化包时明确，不默许精度下降。
+  - **Done when / Stop**：有固定工作量、身份一致的实际对照和等价性证据，只有端到端实测改善才保留优化并报告倍率；无改善撤回候选，记录未取得加速，不降低工作量或自动追加训练。短时吞吐不替代策略质量；6B仍依赖原第6步的4+5前置及单独运行授权。6A完成不等于热点优化/性能对照完成，未预选compile、AMP或采学重叠。
+
+Blockers:
+- 当前迁移无阻塞；固定 seed 的 MuJoCo 八字通过。尚未验证多 seed、其他指令/地形、负重或 MuJoCo Oracle 同条件对照；未做官方/TTT固定工作量性能对照。这些不在本次有界迁移范围。
+
+Next:
+- 本次 sim2sim 交付完成，等待用户下一项需求；不自动重训、调参或扩展仿真/测试。fada heartbeat 保持暂停。
+=======
 - [ ] 6. 官方FADA接入UniLab高吞吐数据与执行架构（6A及6.1–6.5本地实现/CPU验收完成；原生GPU与端到端性能证据待用户）。
   - Preserve：同工作量、同原始13字段/source/episode/strict标签、同采样与随机调用顺序、同loss/两optimizer更新和每轮最新权重。保留唯一正式入口、Runner/shadow生命周期、旧学生播放和持久化恢复；不移植APPO算法或新增第二个完整训练循环。
   - [x] 6A 已有计时与CPU等价证据：正式入口、resident worker、raw v8、NumPy Replay、真实Torch learner/两AdamW、checkpoint与共享权重的warmup+两轮DAgger，计时OFF/ON的模型/loss/RNG/发布轨迹一致（本轮前终端证据，临时脚本已清理）。现有`[FADA PERF]`继续复用；GPU端到端性能未验证。
@@ -137,3 +174,4 @@ Blockers:
 
 Next:
 - 用户上传当前代码并按README启动或恢复，反馈真实错误或性能记录后按具体证据处理；当前无待执行的本地实现。保留6.5/原第6步整体待服务器验收，不宣称已加速、不自动启动训练。
+>>>>>>> 674954faf65b10b43223b68dfd8e73080945f7aa

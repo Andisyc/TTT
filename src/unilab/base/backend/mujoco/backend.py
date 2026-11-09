@@ -179,7 +179,22 @@ def _apply_position_actuator_gains_to_mj_model(
     kp: float | np.ndarray,
     kd: float | np.ndarray,
     actuator_ids=slice(None),
+    joint_names=None,
 ) -> None:
+    # Resolve source ordering once when compiling/materializing each model.
+    if joint_names is not None:
+        names = tuple(joint_names)
+        target_names = tuple(
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, int(joint_id))
+            for joint_id in model.actuator_trnid[:, 0]
+        )
+        if len(names) != len(target_names) or len(names) != len(set(names)) or set(names) != set(target_names):
+            raise ValueError("position_actuator_gains joint_names must match all actuated joints")
+        if np.asarray(kp).shape != (len(names),) or np.asarray(kd).shape != (len(names),):
+            raise ValueError("named position_actuator_gains require one kp/kd per joint")
+        source_ids = np.asarray([names.index(name) for name in target_names])
+        kp = np.asarray(kp)[source_ids]
+        kd = np.asarray(kd)[source_ids]
     _assert_position_actuator_targets(model, actuator_ids)
     kp_arr = np.asarray(kp, dtype=np.float64)
     kd_arr = np.asarray(kd, dtype=np.float64)
@@ -1380,6 +1395,8 @@ class MuJoCoBackend(SimBackend):
         return self._base_lin_vel_view
 
     def get_base_ang_vel(self) -> np.ndarray:
+        if self._root_qpos_dim != 7:
+            return self._base_ang_vel_view
         # Free-joint qvel stores BODY angular velocity. Rotate without altering
         # the physics state or allocating per-environment temporaries.
         quat = self._base_quat_view
@@ -1770,10 +1787,12 @@ class MuJoCoBackend(SimBackend):
         kp: float | np.ndarray,
         kd: float | np.ndarray,
         actuator_ids=slice(None),
+        joint_names=None,
     ) -> None:
         _apply_position_actuator_gains_to_mj_model(
             model,
             kp=kp,
             kd=kd,
             actuator_ids=actuator_ids,
+            joint_names=joint_names,
         )

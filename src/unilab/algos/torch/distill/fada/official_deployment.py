@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,23 @@ def load_official_playback_profile(cfg: Any, *, root_dir: str | Path, source_ide
     if not isinstance(payload, Mapping):
         raise ValueError("official playback control profile must be a mapping")
     return OfficialFADAPlaybackProfile.from_mapping(payload, source_identity=source_identity)
+
+
+def bind_official_playback_control(env_cfg_override, profile: OfficialFADAPlaybackProfile):
+    """Bind source PD before backend initialization and DR baseline capture."""
+    override = deepcopy(dict(env_cfg_override or {}))
+    control = override.setdefault("control_config", {})
+    control["position_actuator_gains"] = {
+        "joint_names": list(profile.joint_names),
+        "kp": list(profile.stiffness), "kd": list(profile.damping),
+    }
+    control["simulate_action_latency"] = False
+    override["ctrl_dt"] = profile.ctrl_dt
+    override["gait_phase_enabled"] = True
+    override["gait_phase_init_mode"] = "offset_phase"
+    override["gait_clock_mode"] = profile.gait_clock_mode
+    override.setdefault("reward_config", {})["gait_frequency"] = profile.gait_frequency
+    return override
 
 
 class OfficialFADADeploymentAdapter:
@@ -90,10 +108,13 @@ class OfficialFADADeploymentAdapter:
         from unilab.algos.torch.distill.fada.observation import project_official_7d_command
         if phase is None:
             raise ValueError("official FADA playback requires same-step gait_phase; phase is not zero-padded")
-        return project_official_7d_command(
-            torch.as_tensor(velocity, dtype=torch.float32, device=self.device),
-            torch.as_tensor(phase, dtype=torch.float32, device=self.device),
-        )
+        velocity = torch.as_tensor(velocity, dtype=torch.float32, device=self.device)
+        phase = torch.as_tensor(phase, dtype=torch.float32, device=self.device)
+        # Pinned official LocomotionGait exposes pi/pi at stand, while its
+        # episode clock continues underneath and resumes without restarting.
+        standing = (torch.linalg.vector_norm(velocity[:, :2], dim=1) < .01) & (velocity[:, 2].abs() < .01)
+        phase = torch.where(standing[:, None], torch.full_like(phase, torch.pi), phase)
+        return project_official_7d_command(velocity, phase)
 
     def env_action(self, source_action: torch.Tensor) -> torch.Tensor:
         return source_action.index_select(1, self._target_from_source) * self._action_gain + self._action_bias

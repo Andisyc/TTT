@@ -444,6 +444,9 @@ Oracle 批量采集入口是 `src/unilab/algos/torch/distill/fada/oracle_runtime
 产物及结果均携带源 profile，窗口和旧原生源格式保持一致。
 父进程读取产物后先调用 `identity_fields()` 校验行字段，再通过
 `FADAReplayBuffer.add_artifact()` 入库；最后关闭运行时。
+关闭路径会显式 join/close 采集进程并等待自有队列 feeder 退出，不依赖垃圾回收释放句柄。
+共享权重由创建者负责 unlink；导出视图阻止句柄关闭时，`cleanup()` 仍移除共享内存名称并传播错误，
+调用方释放视图后可重试关闭句柄。附加进程的 `close()` 不移除创建者的名称。
 原生训练入口为 `scripts/train_distill.py --config-name oracle_fada`，
 `teacher.checkpoint_path` 指定最终 Oracle，`training.fada.scene_model_file` 可重定位同内容场景。
 默认使用最终 Oracle；设置 `training.fada.paper_source_enabled=true` 时沿用现有
@@ -455,6 +458,31 @@ Oracle 批量采集入口是 `src/unilab/algos/torch/distill/fada/oracle_runtime
 原有旧学生和官方学生分支保持不变。录制的指令、噪声、DR、负重、时长和 reset 设置仍可覆盖，
 源物理步长、控制周期、PD、动作缩放、相位时钟及观测/关节顺序必须匹配。
 跨机器时用 `training.fada.scene_model_file` 指向同内容场景文件及其配套资产。
+原作者完整训练核心的独立接入入口为 `scripts/train_fada_upstream.py`，不经过上述
+`oracle_fada` 采集、Replay 或 learner。它在新的运行目录中直接调用锁定上游
+`LeCAR-Lab/FADA@290b3a9c5c0ebe2e9851b61350617544be05e9bc` 的 `FADATrainer.warmup/run_loop`。
+前提是具有该未修改 checkout 和 Holosoma Python 依赖的独立环境；不要为此覆盖当前 `.venv`
+或替换其 MuJoCo。该入口仍使用当前 UniLab MuJoCo 物理，因此不代表原生崩溃已经修复。
+
+```bash
+uv run --frozen --no-sync python scripts/train_fada_upstream.py \
+  --upstream-root "$FADA_ROOT" \
+  --oracle-checkpoint model/mirror/model_50000.pt \
+  --scene-model-file model/straight_mix_50k_assets/g1/scene_flat.xml \
+  --output-dir logs/fada/upstream/new_run \
+  --wandb-mode disabled
+```
+
+其余参数由原作者 CLI 解析，默认保留原作者的 warmup、次优 checkpoint 和 DAgger 配方；
+次优数据仍需要老师目录中的中间 checkpoint，不足时不会静默取消。仅支持源 MuJoCo 的
+headless 新运行，不将原作者的 `simulator_override` 或旧学生 resume 解释成新的兼容路径。
+缓存固定在新运行目录；已有输出目录会被拒绝。主、影子进程分别加载同一 Oracle，影子状态
+传输同时携带物理、任务、随机数和各环境随机化模型字段，不只复制 qpos/qvel。
+原作者 checkpoint 的模型和优化器字段保留，新增 `unilab_upstream_source` 保存源控制与环境；
+现有回放、在线 LoRA 加载器可识别此格式，无需读取老师文件或另填控制 profile。
+无源绑定的外部原作者 checkpoint 须通过 `load_upstream_fada_checkpoint(..., source=...)`
+显式提供真实源信息，禁止猜测控制参数。旧 checkpoint、旧入口及其默认配置保持原样。
+
 
 下面以 `model/mirror/model_50000.pt` 及现有本地配套资产为例，输出到一个新的训练目录：
 

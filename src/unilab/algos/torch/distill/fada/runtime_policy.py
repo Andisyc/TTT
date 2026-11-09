@@ -92,12 +92,12 @@ class OfficialFADAPlaybackProfile:
     action_scale: tuple[float, ...]
     stiffness: tuple[float, ...]
     damping: tuple[float, ...]
-    clip_actions: float
+    clip_actions: float | None
     sim_dt: float
     ctrl_dt: float
     gait_frequency: float
     gait_clock_mode: str
-    phase_init: tuple[float, float]
+    phase_init: tuple[float, float] | None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any], *, source_identity: Mapping[str, str]) -> OfficialFADAPlaybackProfile:
@@ -116,12 +116,15 @@ class OfficialFADAPlaybackProfile:
         scalars = {}
         for name in ("clip_actions", "sim_dt", "ctrl_dt", "gait_frequency"):
             value = payload[name]
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-                raise ValueError(f"official playback {name} must be positive and finite")
-            scalars[name] = float(value)
+            if name == "clip_actions" and value is None:
+                scalars[name] = None
+            else:
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                    raise ValueError(f"official playback {name} must be positive and finite")
+                scalars[name] = float(value)
         phase = payload["phase_init"]
-        if not isinstance(phase, Sequence) or isinstance(phase, (str, bytes)) or len(phase) != 2 or any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in phase):
-            raise ValueError("official playback phase_init must contain two finite radians")
+        if phase is not None and (not isinstance(phase, Sequence) or isinstance(phase, (str, bytes)) or len(phase) != 2 or any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in phase)):
+            raise ValueError("official playback phase_init must contain two finite radians or be null")
         clock = payload["gait_clock_mode"]
         if not isinstance(clock, str) or not clock:
             raise ValueError("official playback gait_clock_mode must name the source clock")
@@ -131,7 +134,7 @@ class OfficialFADAPlaybackProfile:
             action_scale=_vector(payload["action_scale"], "action_scale", positive=True),
             stiffness=_vector(payload["stiffness"], "stiffness", positive=True),
             damping=_vector(payload["damping"], "damping", nonnegative=True),
-            gait_clock_mode=clock, phase_init=(float(phase[0]), float(phase[1])), **scalars,
+            gait_clock_mode=clock, phase_init=(None if phase is None else (float(phase[0]), float(phase[1]))), **scalars,
         )
 
     def source_indices(self, target_joint_names: Sequence[str]) -> tuple[int, ...]:

@@ -141,14 +141,15 @@ class SharedWeightSync:
         return version
 
     def cleanup(self) -> None:
+        """Retire the owner name even when an exported view prevents handle closure."""
         try:
             self._shm.close()
-            self._shm.unlink()
-        except Exception:
-            pass
+        finally:
+            try:
+                self._shm.unlink()
+            except FileNotFoundError:
+                pass
 
     def close(self) -> None:
-        try:
-            self._shm.close()
-        except Exception:
-            pass
+        """Release this handle without unlinking the creator's shared-memory name."""
+        self._shm.close()

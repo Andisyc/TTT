@@ -9,7 +9,9 @@ from typing import Any, cast
 
 from omegaconf import DictConfig, OmegaConf
 
-from unilab.algos.torch.distill.fada.observation import FADA_G1_STATE_OBSERVATION_CONTRACT
+from unilab.algos.torch.distill.fada.observation import (
+    FADA_G1_STATE_OBSERVATION_CONTRACT, FADA_OFFICIAL_COMPACT_OBSERVATION_CONTRACT,
+)
 from unilab.envs.locomotion.g1.motion_quality_config import build_motion_quality_reward_config
 from unilab.training import BackendAdapter
 from unilab.training.oracle.checkpoint import ENVIRONMENT_FIELDS, validate_environment_contract
@@ -32,9 +34,9 @@ def oracle_student_source_profile(
         raise ValueError("Oracle student requires embedded runtime_config.source_profile")
     if profile.get("kind") != "unilab_oracle" or type(profile.get("version")) is not int or profile["version"] != 1:
         raise ValueError("Unsupported Oracle student source profile kind/version")
-    if (observation_contract != FADA_G1_STATE_OBSERVATION_CONTRACT
+    if (observation_contract not in {FADA_G1_STATE_OBSERVATION_CONTRACT, FADA_OFFICIAL_COMPACT_OBSERVATION_CONTRACT}
             or profile.get("student_observation_contract") != observation_contract):
-        raise ValueError("Oracle student source profile requires g1_fada_state_v2")
+        raise ValueError("Oracle student source profile observation contract differs from its policy")
     controls = profile.get("control_contract")
     environment = profile.get("environment_config")
     identity = profile.get("teacher_identity")

@@ -326,6 +326,9 @@ def load_fada_deployable_policy_checkpoint(
         raise ValueError("unsupported or malformed FADA deployable checkpoint schema")
     if payload.get("format") == "unilab_official_fada_student":
         return load_official_fada_playback_checkpoint(path, device=device)
+    if "model_state_dict" in payload and "compact_obs" in payload and "cfg" in payload:
+        from unilab.algos.torch.distill.fada.upstream_checkpoint import load_upstream_fada_checkpoint
+        return load_upstream_fada_checkpoint(path, device=device)
     schema = payload.get("schema_version")
     if schema in {1, 2, 3, FADA_CHECKPOINT_SCHEMA_VERSION}:
         return load_fada_policy_checkpoint(path, device=device)

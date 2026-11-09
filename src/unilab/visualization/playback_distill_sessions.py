@@ -402,7 +402,12 @@ def create_fada_playback_session(
             architecture = get_fada_runtime_spec(loaded.policy)
             # Bind the actual source control contract before creating any env.
             official_profile = load_official_playback_profile(
-                cfg, root_dir=root_dir, source_identity=loaded.checkpoint["source_identity"]
+                cfg, root_dir=root_dir, source_identity=loaded.checkpoint["source_identity"],
+                embedded_profile=loaded.checkpoint.get("control_profile"),
+            )
+            from unilab.algos.torch.distill.fada.oracle_deployment import oracle_student_source_profile
+            oracle_source_profile = oracle_student_source_profile(
+                loaded.checkpoint, observation_contract=architecture.observation_contract,
             )
         else:
             architecture = loaded.policy.config

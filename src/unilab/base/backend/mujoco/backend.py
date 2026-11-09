@@ -1585,6 +1585,38 @@ class MuJoCoBackend(SimBackend):
         self._sensor_data[:] = snapshot["sensor_data"]
         self._pending_xfrc_applied[:] = snapshot["pending_xfrc_applied"]
 
+    def capture_transfer_rollout_state(self) -> dict[str, Any]:
+        """Export mutable model fields as well as physics; never export native handles."""
+        from mujoco.batch_env import SUPPORTED_FIELDS
+
+        if self._pool is None:
+            raise RuntimeError("portable snapshot requires a materialized MuJoCo pool")
+        return {
+            "state": self.capture_rollout_state(),
+            "model_fields": {
+                name: np.stack([self._pool.get_field(i, name) for i in range(self._num_envs)])
+                for name in SUPPORTED_FIELDS
+            },
+        }
+
+    def restore_transfer_rollout_state(self, snapshot: Any) -> None:
+        """Install source DR parameters before restoring source physics and caches."""
+        from mujoco.batch_env import SUPPORTED_FIELDS
+
+        if self._pool is None:
+            raise RuntimeError("portable restore requires a materialized MuJoCo pool")
+        if not isinstance(snapshot, dict) or set(snapshot) != {"state", "model_fields"}:
+            raise ValueError("invalid portable MuJoCo snapshot")
+        fields = snapshot["model_fields"]
+        if not isinstance(fields, dict) or set(fields) != set(SUPPORTED_FIELDS):
+            raise ValueError("portable MuJoCo snapshot lacks model randomization fields")
+        self._pool.reset(
+            env_ids=np.arange(self._num_envs, dtype=np.int32),
+            initial_state=snapshot["state"]["physics_state"],
+            randomization={name: np.asarray(value).copy() for name, value in fields.items()},
+        )
+        self.restore_rollout_state(snapshot["state"])
+
     def get_playback_model(self, env_index: int | None = None):
         """Return the MuJoCo model used by playback for one vectorized env.
 

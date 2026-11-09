@@ -197,7 +197,9 @@ def test_persistent_runner_close_is_idempotent_and_reaps_worker(tmp_path):
     runner.close()
 
     assert process is not None
-    assert not process.is_alive()
+    assert runner._collector_process is None
+    with pytest.raises(ValueError, match="closed"):
+        process.is_alive()
 
 
 def test_persistent_runner_rejects_request_outside_activated_checkpoint_barrier(tmp_path):

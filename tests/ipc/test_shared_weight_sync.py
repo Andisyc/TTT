@@ -177,3 +177,18 @@ def test_multiprocess_write_then_read(tiny_weight_shapes):
         assert torch.allclose(written_sd[name].float(), read_sd[name].float(), atol=1e-6)
 
     ws.cleanup()
+
+
+def test_cleanup_unlinks_owner_name_when_an_exported_view_prevents_close():
+    from multiprocessing import shared_memory
+
+    owner = SharedWeightSync.from_state_dict({"weight": torch.ones(1)})
+    exported = owner._shm.buf[:]
+    try:
+        with pytest.raises(BufferError):
+            owner.cleanup()
+        with pytest.raises(FileNotFoundError):
+            shared_memory.SharedMemory(name=owner.name, create=False)
+    finally:
+        exported.release()
+        owner.cleanup()

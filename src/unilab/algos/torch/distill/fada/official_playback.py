@@ -208,7 +208,8 @@ class OfficialFADAPlaybackController:
         # Source-semantics clip on the normalized command; only this first
         # action is executed and recorded. The full predicted nominal future
         # and action chunk stay untouched for snapshot/online consumers.
-        action = torch.clamp(action, -self.profile.clip_actions, self.profile.clip_actions)
+        if self.profile.clip_actions is not None:
+            action = torch.clamp(action, -self.profile.clip_actions, self.profile.clip_actions)
         # Record u_t now; it enters the action history at the next observation
         # advance so the snapshot above keeps actions strictly through t-1 and
         # the appended slot stays aligned with the shifted valid suffix.

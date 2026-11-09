@@ -13,9 +13,11 @@ from unilab.algos.torch.distill.fada.runtime_policy import OfficialFADAPlaybackP
 from unilab.envs.common.rotation import np_quat_apply_inverse
 
 
-def load_official_playback_profile(cfg: Any, *, root_dir: str | Path, source_identity) -> OfficialFADAPlaybackProfile:
+def load_official_playback_profile(cfg: Any, *, root_dir: str | Path, source_identity, embedded_profile=None) -> OfficialFADAPlaybackProfile:
     path = OmegaConf.select(cfg, "official_playback.profile_path", default=None)
     if not path:
+        if embedded_profile is not None:
+            return OfficialFADAPlaybackProfile.from_mapping(embedded_profile, source_identity=source_identity)
         fields = ", ".join(OfficialFADAPlaybackProfile.__dataclass_fields__)
         raise ValueError(
             "official FADA playback requires official_playback.profile_path bound to the "
@@ -105,4 +107,5 @@ class OfficialFADADeploymentAdapter:
         ).reshape(-1)
         if mask.shape != (int(self.env.num_envs),):
             raise ValueError("official phase reset mask batch mismatch")
-        state.info["gait_phase"][mask] = self.profile.phase_init
+        if self.profile.phase_init is not None:
+            state.info["gait_phase"][mask] = self.profile.phase_init

@@ -494,6 +494,14 @@ class SimBackend(abc.ABC):
             f"{self.__class__.__name__} does not support exact rollout snapshots"
         )
 
+    def capture_transfer_rollout_state(self) -> Any:
+        """Capture physics and per-environment model parameters for another process."""
+        raise NotImplementedError("this backend does not support portable rollout state")
+
+    def restore_transfer_rollout_state(self, snapshot: Any) -> None:
+        """Restore a portable snapshot into a separately constructed compatible backend."""
+        raise NotImplementedError("this backend does not support portable rollout state")
+
     def prepare_isolated_rollout_branch(self) -> None:
         """Materialize backend resources for counterfactual rollout isolation."""
         raise NotImplementedError(

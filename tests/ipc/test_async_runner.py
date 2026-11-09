@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import signal
 import time
+from multiprocessing import shared_memory
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -181,12 +183,17 @@ def test_close_joins_running_collector():
     )
     r._collector_process.start()
     assert r._collector_process.is_alive()
+    process = r._collector_process
+    sentinel = process.sentinel
 
     r.close()
 
     assert r._stop_event.is_set()
-    assert not r._collector_process.is_alive()
-    assert r._collector_process.exitcode in (0, -signal.SIGTERM)
+    assert r._collector_process is None
+    with pytest.raises(ValueError, match="closed"):
+        process.is_alive()
+    with pytest.raises(OSError):
+        os.fstat(sentinel)
 
 
 # ---------------------------------------------------------------------------
@@ -332,3 +339,35 @@ def test_del_does_not_raise_even_if_close_fails():
     r._shared_resources = None  # type: ignore[assignment]  # will raise in close()
     # __del__ calls close() and must not propagate the exception
     r.__del__()  # noqa: PLC2801  (explicit __del__ call for test)
+
+
+def test_close_waits_for_owned_queue_feeder():
+    runner = _make_runner()
+    owned_queue = _SPAWN_CTX.Queue(maxsize=1)
+    runner._shared_resources.append(owned_queue)
+    owned_queue.put("ready")
+    assert owned_queue.get(timeout=2.0) == "ready"
+    feeder = owned_queue._thread
+    runner.close()
+    assert feeder is not None and not feeder.is_alive()
+
+
+def test_close_retires_other_resources_when_one_handle_cannot_close():
+    import torch
+    from unilab.ipc.weight_sync import SharedWeightSync
+
+    runner = _make_runner()
+    first = SharedWeightSync.from_state_dict({"weight": torch.ones(1)})
+    second = SharedWeightSync.from_state_dict({"weight": torch.ones(1)})
+    exported = first._shm.buf[:]
+    runner._shared_resources.extend([first, second])
+    try:
+        with pytest.raises(BufferError):
+            runner.close()
+        for name in (first.name, second.name):
+            with pytest.raises(FileNotFoundError):
+                shared_memory.SharedMemory(name=name, create=False)
+    finally:
+        exported.release()
+        first.cleanup()
+        second.cleanup()

@@ -171,6 +171,14 @@ class NpEnv(ABEnv):
                 f"{self.__class__.__name__} returned task rollout state without a restore owner"
             )
 
+    def capture_transfer_rollout_state(self) -> Any:
+        """Export backend physics and model parameters for an independent shadow."""
+        return self._backend.capture_transfer_rollout_state()
+
+    def restore_transfer_rollout_state(self, snapshot: Any) -> None:
+        """Restore backend parameters before the environment rollout snapshot."""
+        self._backend.restore_transfer_rollout_state(snapshot)
+
     @contextmanager
     def preserve_rollout_state(self) -> Iterator[None]:
         """Run a non-autoreset branch and restore all environment state on exit."""

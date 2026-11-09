@@ -1,0 +1,104 @@
+diff --git a/src/holosoma/holosoma/fada/common/compact_obs.py b/src/holosoma/holosoma/fada/common/compact_obs.py
+index 310e705..3265bed 100644
+--- a/src/holosoma/holosoma/fada/common/compact_obs.py
++++ b/src/holosoma/holosoma/fada/common/compact_obs.py
+@@ -90,6 +90,6 @@ def extract_compact_obs(
+ 
+     chunks: list[torch.Tensor] = []
+     for term_name in COMPACT_TERM_ORDER:
+-        value = raw_terms[term_name] * float(resolved_scale[term_name])
++        value = raw_terms[term_name][:] * float(resolved_scale[term_name])
+         chunks.append(value)
+     return torch.cat(chunks, dim=1)
+diff --git a/src/holosoma/holosoma/fada/planner_idm/trainer.py b/src/holosoma/holosoma/fada/planner_idm/trainer.py
+index 10e923b..a4b96b0 100644
+--- a/src/holosoma/holosoma/fada/planner_idm/trainer.py
++++ b/src/holosoma/holosoma/fada/planner_idm/trainer.py
+@@ -513,12 +513,13 @@ def _strict_label_worker_entry(
+     cfg: FADAConfig,
+     runtime_log_dir: str,
+     experiment_override_args: list[str] | None,
++    runtime_factory: Any = build_env_and_expert,
+ ) -> None:
+     env = None
+     simulation_app = None
+     try:
+         set_seed(int(cfg.seed))
+-        env, simulation_app, expert_policy, resolved_device, _ = build_env_and_expert(
++        env, simulation_app, expert_policy, resolved_device, _ = runtime_factory(
+             cfg,
+             runtime_log_dir=Path(runtime_log_dir),
+             experiment_override_args=experiment_override_args,
+@@ -600,6 +601,7 @@ class StrictLabelWorkerClient:
+         runtime_log_dir: Path,
+         experiment_override_args: list[str] | None = None,
+         timeout_s: float = 60.0,
++        runtime_factory: Any = build_env_and_expert,
+     ) -> None:
+         self._timeout_s = float(timeout_s)
+         if self._timeout_s <= 0.0:
+@@ -613,6 +615,7 @@ class StrictLabelWorkerClient:
+                 "cfg": cfg,
+                 "runtime_log_dir": str(runtime_log_dir),
+                 "experiment_override_args": list(experiment_override_args) if experiment_override_args else None,
++                "runtime_factory": runtime_factory,
+             },
+             daemon=True,
+         )
+diff --git a/src/holosoma/holosoma/fada/planner_idm/trainer_rollout.py b/src/holosoma/holosoma/fada/planner_idm/trainer_rollout.py
+index 352227f..e7c6071 100644
+--- a/src/holosoma/holosoma/fada/planner_idm/trainer_rollout.py
++++ b/src/holosoma/holosoma/fada/planner_idm/trainer_rollout.py
+@@ -134,7 +134,7 @@ class _RolloutMixin:
+         snapshot: dict[str, Any] = {}
+         simulator = env.simulator
+         snapshot["sim_all_root_states"] = self._clone_root_states_tensor(simulator.all_root_states)
+-        snapshot["sim_dof_state"] = simulator.dof_state.detach().clone()
++        snapshot["sim_dof_state"] = simulator.dof_state[:].detach().clone()
+         if hasattr(simulator, "contact_forces_history") and isinstance(simulator.contact_forces_history, torch.Tensor):
+             snapshot["sim_contact_forces_history"] = simulator.contact_forces_history.detach().clone()
+         if hasattr(simulator, "commands") and isinstance(simulator.commands, torch.Tensor):
+@@ -269,15 +269,20 @@ class _RolloutMixin:
+                 except Exception:
+                     continue
+         snapshot["curriculum_states"] = curriculum_states
++        capture_fada_physics_state = getattr(env, "capture_fada_physics_state", None)
++        if capture_fada_physics_state is not None:
++            snapshot["fada_physics_state"] = capture_fada_physics_state()
+         return snapshot
+ 
+     def _restore_env_snapshot(self, env: Any, snapshot: dict[str, Any]) -> None:
+         snapshot = _nested_to_device(snapshot, device=env.device)
+         simulator = env.simulator
++        if "fada_physics_state" in snapshot:
++            env.restore_fada_physics_state(snapshot["fada_physics_state"])
+         env_ids = torch.arange(int(env.num_envs), device=env.device, dtype=torch.long)
+ 
+         self._restore_root_states_tensor(simulator.all_root_states, snapshot["sim_all_root_states"], env.device)
+-        simulator.dof_state.copy_(snapshot["sim_dof_state"])
++        simulator.dof_state[:] = snapshot["sim_dof_state"]
+         simulator.set_actor_root_state_tensor(env_ids, simulator.all_root_states)
+         simulator.set_dof_state_tensor(env_ids, simulator.dof_state)
+         if "sim_contact_forces_history" in snapshot and hasattr(simulator, "contact_forces_history"):
+diff --git a/src/holosoma/holosoma/simulator/mujoco/mujoco.py b/src/holosoma/holosoma/simulator/mujoco/mujoco.py
+index 96c27dc..b8e798c 100644
+--- a/src/holosoma/holosoma/simulator/mujoco/mujoco.py
++++ b/src/holosoma/holosoma/simulator/mujoco/mujoco.py
+@@ -95,6 +95,8 @@ class MuJoCo(BaseSimulator):
+     the holosoma simulator interface with unified state access and the shared terrain system.
+     """
+ 
++    scene_manager_class = MujocoSceneManager
++
+     def __init__(self, tyro_config: FullSimConfig, terrain_manager: TerrainManager, device: str) -> None:
+         """Initialize MuJoCo simulator.
+ 
+@@ -326,7 +328,7 @@ class MuJoCo(BaseSimulator):
+         logger.info("=== Loading assets ===")
+ 
+         # Create scene manager
+-        self.scene_manager = MujocoSceneManager(self.simulator_config)
++        self.scene_manager = self.scene_manager_class(self.simulator_config)
+         self._setup_scene()
+ 
+         # Compile once at the end

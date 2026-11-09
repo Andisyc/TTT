@@ -54,7 +54,7 @@ class _SimulatorObservation:
     def robot_root_states(self) -> torch.Tensor:
         owner, env = self.owner, self.owner.env
         quat = owner.tensor(env.get_base_quat())[:, (1, 2, 3, 0)]
-        angular = owner.tensor(env.get_body_ang_vel_w(owner.base_body_ids))[:, 0]
+        angular = owner.tensor(env.get_base_ang_vel())
         return torch.cat((owner.tensor(env.get_base_pos()), quat,
                           owner.tensor(env.get_base_lin_vel()), angular), dim=1)
 
@@ -70,7 +70,6 @@ class UpstreamEnvironment:
         self.robot_config = SimpleNamespace(
             actions_dim=29, control=SimpleNamespace(clip_actions=False),
         )
-        self.base_body_ids = env.get_body_ids(("pelvis",))
         self.default_dof_pos = self.tensor(np.asarray(env.default_angles).reshape(1, 29))
         self.command_manager = _Commands(self)
         self.simulator = _SimulatorObservation(self)

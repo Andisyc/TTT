@@ -472,6 +472,18 @@ uv run --frozen --no-sync python scripts/train_fada_upstream.py \
   --output-dir logs/fada/upstream/new_run \
   --wandb-mode disabled
 ```
+服务器已准备的独立环境可通过 `VIRTUAL_ENV=/ssd1/cyx/.venvs/ttt-fada-upstream`
+和 `uv run --active --frozen --no-sync` 选择；对应固定源码为
+`/ssd1/cyx/.deps/FADA-290b3a9`。不要省略 `--active` 后误用项目 `.venv`。
+该环境只读复用项目 Torch，额外 Python 依赖安装在独立目录。服务器启动入口
+`bash /ssd1/cyx/.deps/start_fada_upstream.sh` 已显式选择隔离构建的 MuJoCo 修复版：
+`/ssd1/cyx/.deps/fada-native-repair/overlay`；父进程和 spawn 子进程加载相同扩展。
+启动脚本缺少该扩展时直接退出，不静默回退；原 `.venv` 和旧蒸馏入口不变。
+修复包含线程池并发拒绝、工作线程异常传播和提交中断后的任务收尾；
+离线线程/缓冲区生命周期、小模型串行数值对齐、XML 导出及 Oracle 初始化检查已通过。
+原脚本备份为 `/ssd1/cyx/.deps/start_fada_upstream.before-native-repair.sh`。
+这些检查不包含完整 Planner–IDM 训练。
+
 
 其余参数由原作者 CLI 解析，默认保留原作者的 warmup、次优 checkpoint 和 DAgger 配方；
 次优数据仍需要老师目录中的中间 checkpoint，不足时不会静默取消。仅支持源 MuJoCo 的
@@ -480,6 +492,8 @@ headless 新运行，不将原作者的 `simulator_override` 或旧学生 resume
 传输同时携带物理、任务、随机数和各环境随机化模型字段，不只复制 qpos/qvel。
 原作者 checkpoint 的模型和优化器字段保留，新增 `unilab_upstream_source` 保存源控制与环境；
 现有回放、在线 LoRA 加载器可识别此格式，无需读取老师文件或另填控制 profile。
+保存先将模型、优化器及源绑定整理为 CPU payload，一次写入临时文件，再原子替换目标；
+不在训练进程中反序列化，失败不会覆盖旧 checkpoint 或已有恢复用临时文件。
 无源绑定的外部原作者 checkpoint 须通过 `load_upstream_fada_checkpoint(..., source=...)`
 显式提供真实源信息，禁止猜测控制参数。旧 checkpoint、旧入口及其默认配置保持原样。
 

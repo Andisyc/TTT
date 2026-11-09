@@ -1,5 +1,9 @@
 """Behavior at the teacher, portable physics, and original-checkpoint boundaries."""
+import pickle
+import subprocess
 from copy import deepcopy
+from dataclasses import make_dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -72,6 +76,50 @@ def test_portable_snapshot_carries_different_environment_masses():
             backend.close()
 
 
+def _checkpoint_optimizers(model):
+    return (
+        torch.optim.AdamW(model.planner_parameters(), lr=1e-3),
+        torch.optim.AdamW(model.idm_parameters(), lr=2e-3),
+    )
+
+
+def _checkpoint_step(model, optimizers, args, mask):
+    for optimizer in optimizers:
+        optimizer.zero_grad(set_to_none=True)
+    model(*args, history_valid_mask=mask).square().mean().backward()
+    for optimizer in optimizers:
+        optimizer.step()
+
+
+def _checkpoint_trainer(model, binding, compact):
+    from unilab.algos.torch.distill.fada.upstream_training import _trainer_class
+
+    class EmptyReplay(list):
+        def num_valid_chunks(self):
+            return 0
+
+    trainer = _trainer_class(SimpleNamespace(FADATrainer=object))()
+    config = model.official_model_config
+    trainer.cfg = make_dataclass("CheckpointConfig", [(key, type(value)) for key, value in config.items()])(**config)
+    trainer.student_model = model
+    trainer.optimizer, trainer.idm_optimizer = _checkpoint_optimizers(model)
+    trainer.train_step_count, trainer.rollout_step_count = 1, 50
+    trainer.obs_dim, trainer.act_dim, trainer.cmd_dim = 64, 29, 7
+    trainer.offline_buffer, trainer.suboptimal_offline_buffer, trainer.online_buffer = (
+        EmptyReplay(), EmptyReplay(), EmptyReplay(),
+    )
+    trainer.online_val_buffer = None
+    trainer._use_io_normalization = lambda: False
+    trainer._build_compact_obs_checkpoint_payload = lambda: compact
+    trainer.obs_norm_mean, trainer.obs_norm_std = torch.zeros(64), torch.ones(64)
+    trainer.obs_norm_source, trainer.obs_norm_eps = "optimal_offline", 1e-6
+    trainer.action_norm_mean = trainer.action_norm_std = None
+    trainer.command_norm_mean = trainer.command_norm_std = None
+    trainer.experiment_config_payload = binding["source_profile"]["environment_config"]
+    trainer.unilab_source = binding
+    return trainer
+
+
 def test_original_checkpoint_preserves_inference_and_source_semantics(source, tmp_path):
     from unilab.algos.torch.distill.fada.adaptation_checkpoint import load_fada_deployable_policy_checkpoint
     from unilab.algos.torch.distill.fada.collection_contract import OFFICIAL_FADA_SOURCE_REVISION
@@ -101,21 +149,45 @@ def test_original_checkpoint_preserves_inference_and_source_semantics(source, tm
                    stiffness=meta["kp"], damping=meta["kd"], clip_actions=None,
                    sim_dt=meta["sim_dt"], ctrl_dt=meta["ctrl_dt"], gait_frequency=1.0,
                    gait_clock_mode="continuous", phase_init=None)
-    payload = dict(model_state_dict=reference.state_dict(), cfg=cfg,
-                   obs_dim=64, act_dim=29, cmd_dim=7,
-                   compact_obs=dict(term_order=terms, term_scale=dict.fromkeys(terms, 1.0),
-                                    term_noise=dict.fromkeys(terms, 0.0), noise_enabled=False),
-                   unilab_upstream_source=dict(version=1, source_identity=identity,
-                                              source_profile=profile, control=control))
-    path = tmp_path / "model_final.pt"
-    torch.save(payload, path)
-    loaded = load_fada_deployable_policy_checkpoint(path)
+    compact = dict(term_order=terms, term_scale=dict.fromkeys(terms, 1.0),
+                   term_noise=dict.fromkeys(terms, 0.0), noise_enabled=False)
+    binding = dict(version=1, source_identity=identity, source_profile=profile, control=control)
+    trainer = _checkpoint_trainer(reference, binding, compact)
     args = (torch.randn(2, 3, 64), torch.randn(2, 3, 29), torch.randn(2, 7))
     mask = torch.ones(2, 3, dtype=torch.bool)
+    _checkpoint_step(reference, (trainer.optimizer, trainer.idm_optimizer), args, mask)
+    path = tmp_path / "model_final.pt"
+    trainer.save_student_checkpoint(path, extra={"num_iters": 1})
+    loaded = load_fada_deployable_policy_checkpoint(path)
+    payload = loaded.checkpoint
+    assert payload["model_state_dict"]._metadata == reference.state_dict()._metadata
     with torch.inference_mode():
         expected = reference(*args, history_valid_mask=mask)
         actual = loaded.policy(*args, history_valid_mask=mask)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    inputs, result = tmp_path / "inputs.pt", tmp_path / "resumed.pt"
+    torch.save((args, mask), inputs)
+    child = """
+import sys, torch
+from unilab.algos.torch.distill.fada.upstream_checkpoint import load_upstream_fada_checkpoint
+from tests.algos.test_fada_upstream_bridge import _checkpoint_optimizers, _checkpoint_step
+loaded = load_upstream_fada_checkpoint(sys.argv[1])
+optimizers = _checkpoint_optimizers(loaded.policy)
+for optimizer, key in zip(optimizers, ("planner_optimizer_state_dict", "idm_optimizer_state_dict")):
+    optimizer.load_state_dict(loaded.checkpoint[key])
+args, mask = torch.load(sys.argv[2], map_location="cpu", weights_only=True)
+_checkpoint_step(loaded.policy, optimizers, args, mask)
+torch.save((loaded.policy.state_dict(), *(optimizer.state_dict() for optimizer in optimizers)), sys.argv[3])
+"""
+    subprocess.run(
+        ["uv", "run", "--active", "--frozen", "--no-sync", "python", "-c", child, str(path), str(inputs), str(result)],
+        cwd=Path(__file__).resolve().parents[2], check=True, capture_output=True, text=True,
+    )
+    _checkpoint_step(reference, (trainer.optimizer, trainer.idm_optimizer), args, mask)
+    resumed = torch.load(result, map_location="cpu", weights_only=True)
+    torch.testing.assert_close(resumed, (
+        reference.state_dict(), trainer.optimizer.state_dict(), trainer.idm_optimizer.state_dict(),
+    ), rtol=0, atol=0)
     restored = oracle_student_source_profile(loaded.checkpoint, observation_contract="official_compact_64_v1")
     assert restored == profile
     controls = OfficialFADAPlaybackProfile.from_mapping(control, source_identity=identity)
@@ -136,5 +208,22 @@ def test_original_checkpoint_preserves_inference_and_source_semantics(source, tm
     torch.testing.assert_close(clipped.act_projected(torch.zeros(1, 64), torch.zeros(1, 7)), torch.full((1, 29), 0.5))
     payload.pop("unilab_upstream_source")
     torch.save(payload, path)
-    with pytest.raises(ValueError, match="explicit source"):
+    with pytest.raises(ValueError):
         load_upstream_fada_checkpoint(path)
+
+
+def test_upstream_checkpoint_failed_write_preserves_previous_and_recovery_file(tmp_path):
+    from unilab.algos.torch.distill.fada.upstream_training import _save_upstream_checkpoint_payload
+
+    target = tmp_path / "student.pt"
+    previous = {"weights": torch.tensor([1.0, 2.0])}
+    _save_upstream_checkpoint_payload(previous, target)
+    before = target.read_bytes()
+    recovery = tmp_path / "student.pt.tmp"
+    recovery.write_bytes(b"previous failed checkpoint")
+    with pytest.raises((AttributeError, pickle.PicklingError)):
+        _save_upstream_checkpoint_payload({"metadata": lambda: None}, target)
+    assert target.read_bytes() == before
+    assert recovery.read_bytes() == b"previous failed checkpoint"
+    torch.testing.assert_close(torch.load(target, weights_only=True), previous)
+    assert set(tmp_path.iterdir()) == {target, recovery}

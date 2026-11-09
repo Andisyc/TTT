@@ -1,16 +1,20 @@
 """Original FADA trainer with UniLab source bindings; no local learning loop."""
 from __future__ import annotations
 
+import copy
 import dataclasses
 import hashlib
 import importlib
 import json
 import multiprocessing as mp
+import os
+import uuid
 from pathlib import Path
 from typing import Any
 
 import torch
 
+from unilab.algos.torch.distill.contracts.checkpoint import _cpu_checkpoint_value
 from unilab.algos.torch.distill.fada.collection_contract import OFFICIAL_FADA_SOURCE_REVISION
 from unilab.algos.torch.distill.fada.oracle_source import build_oracle_fada_source
 from unilab.algos.torch.distill.fada.upstream_environment import UpstreamEnvironment
@@ -44,6 +48,75 @@ def _source(checkpoint: str, *, device: str, num_envs: int, scene_model_file: st
         raise
 
 
+def _save_upstream_checkpoint_payload(payload: dict[str, Any], path: str | Path) -> Path:
+    """Write one CPU-owned payload without reading it back in the training process."""
+    snapshot = _cpu_checkpoint_value(payload)
+    # Preserve module-version metadata carried outside state_dict mapping entries.
+    for name in ("model_state_dict", "planner_state_dict", "idm_state_dict"):
+        if name in payload:
+            state = copy.copy(payload[name])
+            state.update(snapshot[name])
+            snapshot[name] = state
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+    try:
+        torch.save(snapshot, temporary)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
+
+
+def _upstream_checkpoint_payload(trainer: Any, *, extra: dict[str, Any] | None) -> dict[str, Any]:
+    """Preserve the pinned author's checkpoint schema, adding source binding before save."""
+    assert trainer.idm_optimizer is not None
+    payload = {
+        "model_state_dict": trainer.student_model.state_dict(),
+        "planner_state_dict": trainer.student_model.planner_state_dict(),
+        "idm_state_dict": trainer.student_model.idm_state_dict(),
+        "planner_optimizer_state_dict": trainer.optimizer.state_dict(),
+        "idm_optimizer_state_dict": trainer.idm_optimizer.state_dict(),
+        "train_step_count": trainer.train_step_count,
+        "cfg": dataclasses.asdict(trainer.cfg),
+        "compact_obs": trainer._build_compact_obs_checkpoint_payload(),
+        "obs_dim": trainer.obs_dim,
+        "act_dim": trainer.act_dim,
+        "cmd_dim": trainer.cmd_dim,
+        "offline_buffer_size": len(trainer.offline_buffer),
+        "optimal_offline_buffer_size": len(trainer.offline_buffer),
+        "suboptimal_offline_buffer_size": len(trainer.suboptimal_offline_buffer),
+        "online_buffer_size": len(trainer.online_buffer),
+        "online_val_buffer_size": len(trainer.online_val_buffer) if trainer.online_val_buffer is not None else 0,
+        "offline_valid_chunks": trainer.offline_buffer.num_valid_chunks(),
+        "optimal_offline_valid_chunks": trainer.offline_buffer.num_valid_chunks(),
+        "suboptimal_offline_valid_chunks": trainer.suboptimal_offline_buffer.num_valid_chunks(),
+        "online_valid_chunks": trainer.online_buffer.num_valid_chunks(),
+        "online_val_valid_chunks": (
+            trainer.online_val_buffer.num_valid_chunks() if trainer.online_val_buffer is not None else 0
+        ),
+        "normalization": {"io_enabled": bool(trainer._use_io_normalization())},
+        "unilab_upstream_source": trainer.unilab_source,
+        "rollout_step_count": int(trainer.rollout_step_count),
+    }
+    for group in ("obs", "action", "command"):
+        mean = getattr(trainer, f"{group}_norm_mean")
+        std = getattr(trainer, f"{group}_norm_std")
+        if mean is not None and std is not None:
+            payload[f"{group}_norm_stats"] = {
+                f"{group}_mean": mean.detach().to(device="cpu", dtype=torch.float32),
+                f"{group}_std": std.detach().to(device="cpu", dtype=torch.float32),
+                "enabled": bool(trainer._use_io_normalization()),
+                "source": getattr(trainer, f"{group}_norm_source") or "shared",
+                "eps": float(getattr(trainer, f"{group}_norm_eps")),
+            }
+    if trainer.experiment_config_payload is not None:
+        payload["experiment_config"] = trainer.experiment_config_payload
+    if extra is not None:
+        payload["extra"] = extra
+    return payload
+
+
 def _trainer_class(upstream):
     class UniLabSourceTrainer(upstream.FADATrainer):
         def _capture_env_snapshot(self, env):
@@ -53,17 +126,8 @@ def _trainer_class(upstream):
             env.restore(snapshot)
 
         def save_student_checkpoint(self, path, *, extra=None):
-            # Preserve the author's payload and optimizer state, adding only the
-            # source contract needed to consume it without the Oracle files.
-            target = Path(path)
-            temporary = target.with_suffix(target.suffix + ".tmp")
-            super().save_student_checkpoint(temporary, extra=extra)
-            payload = torch.load(temporary, map_location="cpu", weights_only=True)
-            payload["unilab_upstream_source"] = self.unilab_source
-            payload["rollout_step_count"] = int(self.rollout_step_count)
-            torch.save(payload, temporary)
-            temporary.replace(target)
-            return target
+            payload = _upstream_checkpoint_payload(self, extra=extra)
+            return _save_upstream_checkpoint_payload(payload, path)
     return UniLabSourceTrainer
 
 

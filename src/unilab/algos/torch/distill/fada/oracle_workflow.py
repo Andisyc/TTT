@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import random
 from dataclasses import asdict
 from pathlib import Path
@@ -121,6 +122,13 @@ def run_oracle_fada_training(
                 raise ValueError("Oracle source profile changed during collection")
             identity = artifact.identity_fields()
             _require_fada_curriculum_artifact(cfg, artifact.metadata, identity=identity)
+            if os.environ.get("UNILAB_FADA_CAPTURE_ONLY") == "1":
+                return {
+                    "diagnostic": "collection_completed",
+                    "num_samples": artifact.num_samples,
+                    "artifact": str(result.output_path),
+                    "learner_updates": 0,
+                }
             replay.add_artifact(artifact)
             samples_seen += artifact.num_samples
             stats = trainer.update_from_replay(

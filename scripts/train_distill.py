@@ -264,6 +264,10 @@ def _run_main_with_native_fail_stop() -> None:
     """Run Hydra and preserve any unhandled diagnostic failure in a core."""
 
     try:
+        if os.environ.get("UNILAB_FADA_CAPTURE_ROOT"):
+            from unilab.algos.torch.distill.fada.failure_capture import arm_collection_capture
+
+            arm_collection_capture()
         main()
     except BaseException:
         if os.environ.get("UNILAB_NATIVE_ABORT_ON_CORRUPTION", "0") == "1":

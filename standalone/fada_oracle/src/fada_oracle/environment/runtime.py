@@ -38,6 +38,19 @@ class OracleSceneManager(MujocoSceneManager):
 class OracleMuJoCo(MuJoCo):
     scene_manager_class = OracleSceneManager
 
+    def __init__(self, tyro_config, terrain_manager, device):
+        super().__init__(tyro_config, terrain_manager, device)
+        self._source_forward_graph = None
+        if self.simulator_config.mujoco_backend == MujocoBackend.WARP:
+            import warp as wp
+
+            wp.init()
+            warp_device = wp.get_device(device)
+            stream = wp.stream_to_torch(warp_device.stream)
+            stream.wait_stream(torch.cuda.current_stream(device))
+            torch.cuda.set_stream(stream)
+            self._source_torch_stream = stream
+
     def _setup_scene(self):
         # Do not let the generic scene builder add a second floor or rewrite the
         # source collision masks. All geometry already belongs to the supplied XML.
@@ -60,16 +73,30 @@ class OracleMuJoCo(MuJoCo):
                 with wp.ScopedCapture() as capture:
                     mjw.step(self.backend.mjw_model, self.backend.mjw_data)
                 self.backend.step_graph = capture.graph
+                with wp.ScopedCapture() as capture:
+                    mjw.forward(self.backend.mjw_model, self.backend.mjw_data)
+                self._source_forward_graph = capture.graph
 
     def forward_source_state(self):
         if self.simulator_config.mujoco_backend == MujocoBackend.WARP:
-            import mujoco_warp as mjw
             import warp as wp
 
+            if self._source_forward_graph is None:
+                raise RuntimeError("Source forward graph must be prepared before state synchronization")
             with wp.ScopedDevice(self.backend.mjw_device):
-                mjw.forward(self.backend.mjw_model, self.backend.mjw_data)
+                wp.capture_launch(self._source_forward_graph)
         else:
             mujoco.mj_forward(self.root_model, self.root_data)
+
+    def set_dof_state_tensor(self, env_ids=None, dof_states=None):
+        if env_ids is not None and len(env_ids) == 0:
+            return
+        super().set_dof_state_tensor(env_ids, dof_states)
+        # Reset and snapshot restore write root state before DOFs. Publish the
+        # resulting derived state before the official refresh/observation path.
+        # ClassicBackend already calls mj_forward in its setter.
+        if self.simulator_config.mujoco_backend == MujocoBackend.WARP:
+            self.forward_source_state()
 
 
 class PhysicsViews:
@@ -91,9 +118,6 @@ class PhysicsViews:
         self.floor_id = model.geom("floor").id
         self.floor_z = float(model.geom_pos[self.floor_id, 2])
         self.dof_ids = torch.tensor(simulator.dof_qvel_addrs, device=self.device)
-        self.nominal_mass = torch.tensor(model.body_mass.copy(), device=self.device)
-        self.nominal_friction = torch.tensor(model.geom_friction.copy(), device=self.device)
-        self.nominal_com = torch.tensor(model.body_ipos.copy(), device=self.device)
         self.sensors = {}
         names = metadata["environment_config"]["sensor"]
         for name in (*names.values(), "left_foot_net_contact", "right_foot_net_contact"):
@@ -122,6 +146,14 @@ class PhysicsViews:
             self.com = torch.from_numpy(model.body_ipos).unsqueeze(0)
             self.warmstart = torch.from_numpy(self.data.qacc_warmstart).unsqueeze(0)
             self.clock = None
+            # mj_setConst uses qpos0 and mutates its MjData scratch argument.
+            # Never pass the active state that reset/snapshot restore just wrote.
+            self._constant_data = mujoco.MjData(model)
+        # Native MuJoCo fields are float64; expanded Warp fields are float32.
+        # Capture independent nominal values in the owning buffer's format once.
+        self.nominal_mass = torch.tensor(model.body_mass, dtype=self.mass.dtype, device=self.mass.device)
+        self.nominal_friction = torch.tensor(model.geom_friction, dtype=self.friction.dtype, device=self.friction.device)
+        self.nominal_com = torch.tensor(model.body_ipos, dtype=self.com.dtype, device=self.com.device)
 
     def sensor(self, name):
         return self.sensor_data[:, self.sensors[name]].to(dtype=torch.float32)
@@ -142,7 +174,7 @@ class PhysicsViews:
             factor = torch.empty(count, device=self.device).uniform_(low, high)
             self.friction[env_ids, self.floor_id, 0] *= factor
         if not self.warp:
-            mujoco.mj_setConst(self.model, self.data)
+            mujoco.mj_setConst(self.model, self._constant_data)
 
     def privileged(self, env):
         metadata = env.oracle_metadata
@@ -197,7 +229,7 @@ class PhysicsViews:
             self.clock.copy_(state["time"])
         else:
             self.data.time = float(state["time"][0])
-            mujoco.mj_setConst(self.model, self.data)
+            mujoco.mj_setConst(self.model, self._constant_data)
 
 
 class OracleEnvironment(LeggedRobotLocomotionManager):
@@ -254,29 +286,19 @@ class OracleEnvironment(LeggedRobotLocomotionManager):
         state[standing, 7:13] = torch.empty((int(standing.sum()), 6), device=self.device).uniform_(
             -stand_limit, stand_limit,
         )
-        # MuJoCo freejoint angular qvel is local; Holosoma root-state angular velocity is world-frame.
-        vector = state[:, 10:13].clone()
-        quat = state[:, 3:7]
-        cross = 2 * torch.cross(quat[:, :3], vector, dim=1)
-        state[:, 10:13] = vector + quat[:, 3:4] * cross + torch.cross(quat[:, :3], cross, dim=1)
         self.simulator.robot_root_states[env_ids] = state
         self.need_to_refresh_envs[env_ids] = True
 
     def reset_all(self):
         env_ids = torch.arange(self.num_envs, device=self.device)
         self.reset_envs_idx(env_ids)
-        self.simulator.set_actor_root_state_tensor_robots(env_ids, self.simulator.robot_root_states)
-        self.simulator.set_dof_state_tensor_robots(env_ids, self.simulator.dof_state)
-        self.simulator.forward_source_state()
-        self._refresh_sim_tensors()
-        self._pre_compute_observations_callback()
+        self._refresh_envs_after_reset(env_ids)
         self._compute_observations()
         return self.obs_buf_dict
 
     def _refresh_envs_after_reset(self, env_ids):
-        self.simulator.forward_source_state()
-        self._refresh_sim_tensors()
-        self.need_to_refresh_envs[env_ids] = False
+        if env_ids.numel():
+            super()._refresh_envs_after_reset(env_ids)
 
     def capture_fada_physics_state(self):
         return self.source_views().capture()

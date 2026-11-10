@@ -20,6 +20,39 @@ The controls have different jobs:
 Thread variables alone do not reserve CPU capacity. For a shared or modest server, use CPU
 affinity as well.
 
+## UniLab Planner-IDM resource plan
+
+`uv run --frozen --no-sync --offline python scripts/plan_distill_resources.py` emits JSON configuration
+only. It does not accept an Oracle checkpoint, load a policy, generate shell code, or start training.
+The output separates three concerns:
+
+- `config_name` selects the existing `oracle_fada` profile.
+- `training.fada` contains the complete training overrides: parallel environment count, batch 4096,
+  Replay 524288, 131072 windows per iteration, 31 iterations, and 2000 updates per IDM/Planner phase.
+- `resources` contains recommendations for CPU affinity, RAM/VRAM budgets, priority, and thread limits.
+
+Allowed CPUs are grouped by physical core. Two complete allowed cores are excluded from training
+for SSH/system headroom; training uses all remaining allowed cores, with one environment per
+training physical core and one compute thread per process. Memory planning includes readable
+inherited cgroup v2 limits when available, without requiring controller delegation. It reserves
+8 GiB of currently available RAM and 2048 MiB of free VRAM. Insufficient remaining capacity is
+reported without reducing the learning budget. Environment count is a core-based starting point,
+not a measured optimum or a per-environment memory-fit guarantee.
+
+The generator only reads capacity and queries `nvidia-smi`. It does not create a systemd scope,
+verify runtime limits, require sudo, or require CPU/cpuset delegation. Resource fields are proposed
+budgets, not verified or enforced limits.
+
+This is configuration planning, not a launcher. A subsequent command-generation step must apply
+`resources` to the training process and its collector children, and merge `training` over the
+selected base profile. Merely printing or saving JSON applies no limits to a later training process.
+Resource values are a snapshot; regenerate before launch. These conservative budgets do not prove
+that the full workload fits or that SSH stays responsive; other users' processes remain outside
+this plan.
+
+Only environment parallelism and execution resources change. Oracle, DR, mirror training, model,
+optimizer settings, and learning budget remain untouched; collection may take longer.
+
 ## Preflight
 
 Run these read-only checks before starting a new process:

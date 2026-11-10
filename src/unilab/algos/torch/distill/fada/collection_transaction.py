@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
+import os
 from typing import Any, cast
 
 import numpy as np
@@ -611,7 +612,12 @@ def collect_fada_source_windows(
 ) -> FADACollectionResult:
     """Collect causal source windows with same-state unified-Oracle labels."""
 
-    return _prepare_fada_collection(
+    if os.environ.get("UNILAB_FADA_CAPTURE_ROOT"):
+        from unilab.algos.torch.distill.fada.failure_capture import arm_collection_capture
+
+        arm_collection_capture()
+
+    transaction = _prepare_fada_collection(
         env,
         teacher_policy=teacher_policy,
         config=config,
@@ -619,4 +625,14 @@ def collect_fada_source_windows(
         rollout_policy=rollout_policy,
         rollout_teacher_policy=rollout_teacher_policy,
         spec=spec,
-    ).run()
+    )
+    try:
+        return transaction.run()
+    except Exception as error:
+        from unilab.algos.torch.distill.fada.failure_capture import capture_collection_failure
+
+        try:
+            capture_collection_failure(error, transaction)
+        except Exception as capture_error:
+            error.add_note(f"Failure capture did not complete: {capture_error}")
+        raise

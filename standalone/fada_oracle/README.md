@@ -40,6 +40,12 @@ uv run --frozen --no-sync fada-oracle setup
 
 资产只在启动时检查、复制到本次输出目录。复制品将 position actuator 转换为 motor，保留原力矩限制，避免 XML position controller 与官方 PD 重复控制；不会改写输入资产。运行时没有 XML 解析或 UniLab backend 依赖。
 
+基准质量、摩擦和质心数据在初始化时按对应物理缓冲区的 dtype/device 保存独立快照：标准 MuJoCo 保留 float64，Warp 使用 float32；随机化路径不再临时转换精度。
+
+整局与局部 reset 共用官方 root/DOF 写回、接触历史清理和派生观测刷新顺序；完成后清除刷新标志，空集合不刷新，整局 reset 不额外执行物理步。根状态中的角速度按 MuJoCo 本地 qvel 保存，不再多做一次旋转。Warp 保留其原生 CUDA 流，Torch 通过官方 `stream_to_torch` 接入，并先等待旧 Torch 流完成；不把 Warp 切换到外部流。模型字段扩展后重新捕获 step 和 forward 图，reset 与影子快照恢复重放 forward 图，仍完整计算约束但不推进物理时间。
+
+标准 MuJoCo 的静态参数重算使用初始化时分配的独立 `MjData`，不把活动仿真状态传给会重置 qpos 的 `mj_setConst`，因此随机化和快照恢复不会覆盖刚写入的根状态。
+
 Teacher 使用原 98 维观测和 205 维特权信息，学生使用官方 64 维 compact observation 和 7 维 command。关节顺序、原 PD 参数、150 Hz 仿真 / 50 Hz 控制、世界坐标 torso upvector、原始弧度 gait phase、上一拍原始 action 和实际物理随机化数据由适配层提供。源任务启用但此适配层未支持的模式会明确拒绝，而不是填零冒充数据。Reward 继续使用官方配置，不声称与旧 UniLab reward 等价。
 
 本次本地准备的完整输入位于 `.deps/oracle_source/g1/scene_flat.xml`，匹配当前 `model/mirror/model_50000.pt` 的 XML 指纹。该目录和 checkpoint 都是忽略的本地数据，不随 Git 自动同步。其空的可视 mesh 由机器人 XML 完全相同的本地原始资产补齐，原 XML 未改。

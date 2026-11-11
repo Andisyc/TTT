@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from math import ceil
 from numbers import Integral
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -28,6 +30,14 @@ class FigureEightCommandProgram:
     Reference points integrate these arcs, closing both position and heading.
     Episode-local progress belongs to the playback session, not this table.
     """
+
+    commands: np.ndarray
+    reference_points: np.ndarray
+    ctrl_dt: float
+    segment_steps: int
+    segment_duration_s: float
+    duration_s: float
+    total_control_steps: int
 
     @classmethod
     def from_config(
@@ -133,6 +143,95 @@ class FigureEightCommandProgram:
         _validate_demo_commands(self.commands, env_cfg, keyboard=keyboard)
 
 
+
+
+class CalibratedFigureEightCommandProgram:
+    """Replay a checkpoint-bound table without reading the robot's pose."""
+
+    commands: np.ndarray
+    hold_steps: np.ndarray
+    reference_points: np.ndarray
+    ctrl_dt: float
+    total_control_steps: int
+    duration_s: float
+    metadata: dict[str, Any]
+
+    @classmethod
+    def from_file(
+        cls, path: str | Path, *, identity: dict[str, Any], min_segment_steps: int,
+    ) -> CalibratedFigureEightCommandProgram:
+        with np.load(Path(path).expanduser(), allow_pickle=False) as data:
+            required = {
+                "format_version", "commands", "hold_steps", "reference_points",
+                "ctrl_dt", "metadata_json",
+            }
+            if not required.issubset(data.files):
+                raise ValueError("Incomplete calibrated Gerono program")
+            version = data["format_version"]
+            if version.shape != () or version.dtype.kind not in "iu" or int(version) != 1:
+                raise ValueError("Unsupported calibrated Gerono program format")
+            commands = np.array(data["commands"], dtype=np.float64, copy=True)
+            holds = data["hold_steps"].copy()
+            reference = np.array(data["reference_points"], dtype=np.float64, copy=True)
+            dt = data["ctrl_dt"]
+            if dt.shape != () or not np.isfinite(dt) or float(dt) <= 0:
+                raise ValueError("Calibrated Gerono ctrl_dt must be finite and positive")
+            text = data["metadata_json"]
+            if text.shape != () or text.dtype.kind != "U":
+                raise ValueError("Calibrated Gerono metadata must be a JSON string")
+            metadata = json.loads(str(text))
+        if not isinstance(metadata, dict) or metadata.get("identity") != identity:
+            raise ValueError(
+                "Calibrated Gerono checkpoint/control/geometry identity mismatch; "
+                "use the checkpoint and configuration used for measurement"
+            )
+        if float(dt) != identity.get("ctrl_dt"):
+            raise ValueError("Calibrated Gerono table timestep differs from its control identity")
+        if commands.ndim != 2 or commands.shape[1] != 3 or len(commands) < 2:
+            raise ValueError("Calibrated Gerono commands must have shape (N, 3), N >= 2")
+        if not np.isfinite(commands).all() or np.any(commands[:, 0] <= 0):
+            raise ValueError("Calibrated Gerono requires finite, forward-moving commands")
+        if (holds.shape != (len(commands),) or holds.dtype.kind not in "iu"
+                or np.any(holds <= 0) or min_segment_steps < 1
+                or np.any(holds < min_segment_steps)):
+            raise ValueError("Calibrated Gerono holds violate integer control-step/window limits")
+        total = sum(int(value) for value in holds)
+        if total > np.iinfo(np.int64).max:
+            raise ValueError("Calibrated Gerono cycle exceeds the control-step range")
+        if (reference.ndim != 2 or reference.shape != (len(commands) + 1, 2)
+                or not np.isfinite(reference).all()
+                or not np.allclose(reference[0], reference[-1], rtol=0, atol=1e-9)):
+            raise ValueError("Calibrated Gerono reference must be a finite closed (N+1, 2) route")
+        program = cls()
+        program.commands = commands
+        program.hold_steps = holds.astype(np.int64)
+        program.reference_points = reference
+        program.ctrl_dt = float(dt)
+        program.total_control_steps = total
+        program.duration_s = total * program.ctrl_dt
+        if not np.isfinite(program.duration_s):
+            raise ValueError("Calibrated Gerono duration must be finite")
+        program.metadata = metadata
+        program._segment_ends = np.cumsum(program.hold_steps)
+        for array in (commands, program.hold_steps, reference, program._segment_ends):
+            array.setflags(write=False)
+        return program
+
+    def segment_index_at_control_step(self, control_step: int) -> int:
+        if isinstance(control_step, bool) or not isinstance(control_step, Integral) or control_step < 0:
+            raise ValueError("Gerono control_step must be a non-negative integer")
+        step = int(control_step) % self.total_control_steps
+        return int(np.searchsorted(self._segment_ends, step, side="right"))
+
+    def command_at_control_step(self, control_step: int) -> np.ndarray:
+        return self.commands[self.segment_index_at_control_step(control_step)].copy()
+
+    def time_at_control_step(self, control_step: int) -> float:
+        self.segment_index_at_control_step(control_step)
+        return int(control_step) * self.ctrl_dt
+
+    def validate_environment(self, env_cfg: Any, *, keyboard: bool) -> None:
+        _validate_demo_commands(self.commands, env_cfg, keyboard=keyboard)
 
 
 @dataclass(frozen=True)

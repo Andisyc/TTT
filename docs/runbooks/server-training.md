@@ -181,8 +181,9 @@ Formal training arguments and collection request timeouts are unchanged.
 
 `recording_profile=figure_eight` publishes a repeating open-loop body-frame velocity
 sequence. Commands depend only on configuration and episode-local control steps,
-never on measured world position or heading. Each command is held for
-`demo.figure_eight.segment_duration_s` so online-adaptation windows can mature.
+never on measured world position or heading. Geometric commands are held for
+`demo.figure_eight.segment_duration_s`; calibrated tables use their saved integer
+control-step holds, checked against Planner and online-adaptation window lengths.
 The first lobe turns left and the second turns right; the reference visualization
 uses the same mirrored route. The ideal integrated reference closes in both position
 and heading every cycle.
@@ -196,3 +197,51 @@ timeout before environment creation, avoiding the old 180-second timeout halfway
 through a long demo. Falls and other termination conditions remain unchanged.
 Actual trajectory closure and uninterrupted walking depend on the policy's velocity
 tracking and accumulated drift; the demo does not hide these errors with pose feedback.
+
+### Checkpoint-specific Gerono calibration
+
+`scripts/calibrate_fada_gerono.py` has three explicit stages. No stage trains or
+changes the checkpoint, and `fit` does not create a simulator:
+
+1. `measure` runs the frozen checkpoint on representative forward/yaw commands
+   and independent magnitude-change/left-right transition trials. Actual body
+   velocities are reconstructed from world XY and unwrapped heading, not by
+   treating body gyro Z as world heading rate. Each trial resets once; falls or
+   timeouts stop collection and retain an incomplete archive that fitting refuses.
+2. `fit` identifies directional/coupled first-order responses and rejects models
+   exceeding heldout multi-step velocity RMSE limits. Bounded time scales and
+   measured command bounds constrain a three-continuous-lap trajectory fit.
+   An infeasible Gerono fails explicitly instead of switching to circles.
+3. `verify` executes the frozen table for at least three actual continuous laps
+   without lap resets or pose feedback. It saves measured boundary/crossing errors
+   and fails if the position/heading tolerances are exceeded. A predicted fit is
+   not evidence of successful checkpoint walking.
+
+For the server checkpoint, run these stages separately from the repository root
+after updating the code. Each output path must be new; existing archives are
+never overwritten:
+
+```bash
+RUN=\"logs/fada_online/gerono_$(date +%Y%m%d-%H%M%S)\"
+ARGS=(
+  recording_profile=figure_eight
+  training.device=cuda
+  training.play_checkpoint_path=/ssd1/cyx/TTT/logs/fada/oracle/20261111_102618/student_iter_0031.pt
+  \"gerono_calibration.measurements_path=${RUN}_response.npz\"
+  \"gerono_calibration.program_path=${RUN}_program.npz\"
+  \"gerono_calibration.verification_path=${RUN}_verification.npz\"
+)
+export LD_PRELOAD=/lib/x86_64-linux-gnu/libgcc_s.so.1 MUJOCO_GL=egl
+uv run --frozen --no-sync python scripts/calibrate_fada_gerono.py \"${ARGS[@]}\" gerono_calibration.stage=measure
+uv run --frozen --no-sync python scripts/calibrate_fada_gerono.py \"${ARGS[@]}\" gerono_calibration.stage=fit
+uv run --frozen --no-sync python scripts/calibrate_fada_gerono.py \"${ARGS[@]}\" gerono_calibration.stage=verify
+```
+
+After actual verification, add
+`demo.figure_eight.calibrated_program_path=${RUN}_program.npz` to the existing
+`play_fada_online.py recording_profile=figure_eight` command. Playback validates
+checkpoint content, task/control timing, observation contract, geometry, command
+bounds and minimum holds; it never silently falls back to the geometric table.
+The displayed reference remains the target Gerono, not an integration of the
+compensated commands. Simulator calibration does not establish real-robot or
+perturbed-dynamics accuracy.

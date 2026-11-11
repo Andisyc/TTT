@@ -467,11 +467,6 @@ def create_fada_playback_session(
         log("Keyboard playback reset: standing command with zero base velocity.")
     demo = OmegaConf.select(cfg, "demo.figure_eight", default=None)
     recording_duration = OmegaConf.select(cfg, "video_recording.duration_s", default=None)
-    calibrated_path = getattr(demo, "calibrated_program_path", None) if demo is not None else None
-    if calibrated_path is not None and (
-        not bool(demo.enabled) or playback_cfg.action_mode != "policy" or checkpoint_path is None
-    ):
-        raise ValueError("Calibrated Gerono requires enabled figure-eight and checkpoint policy playback")
     if (demo is not None and bool(demo.enabled) and recording_duration is not None
             and bool(OmegaConf.select(cfg, "video_recording.enabled", default=False))):
         # A long route recording must not restart its phase at the task's old timeout.
@@ -498,51 +493,28 @@ def create_fada_playback_session(
         command_program = None
         demo = getattr(getattr(cfg, "demo", None), "figure_eight", None)
         if demo is not None and bool(getattr(demo, "enabled", False)):
-            if calibrated_path is not None:
-                from unilab.visualization.demo_commands import CalibratedFigureEightCommandProgram
-                from unilab.visualization.gerono_calibration import calibration_identity
-                if architecture is None:
-                    raise ValueError("Calibrated Gerono requires checkpoint architecture metadata")
+            from unilab.visualization.demo_commands import (
+                FigureEightCommandConfig,
+                FigureEightCommandProgram,
+            )
 
-                path = Path(calibrated_path).expanduser()
-                if not path.is_absolute():
-                    path = Path(root_dir) / path
-                horizon = architecture.prediction_horizon
-                min_steps = max(
-                    horizon, horizon + (online.window_size if online is not None else 0) - 1,
-                    horizon + (online.update_interval if online is not None else 0),
-                )
-                identity = calibration_identity(
-                    checkpoint_path, env.cfg, demo, task_name=task_name,
-                    observation_contract=architecture.observation_contract,
-                )
-                command_program = CalibratedFigureEightCommandProgram.from_file(
-                    path, identity=identity, min_segment_steps=min_steps,
-                )
-            else:
-                from unilab.visualization.demo_commands import (
-                    FigureEightCommandConfig,
-                    FigureEightCommandProgram,
-                )
-
-                command_program = FigureEightCommandProgram.from_config(
-                    FigureEightCommandConfig(
-                        width_m=float(demo.width_m), height_m=float(demo.height_m),
-                        speed_m_s=float(demo.speed_m_s),
-                        segment_duration_s=float(demo.segment_duration_s),
-                    ),
-                    ctrl_dt=float(env.cfg.ctrl_dt),
-                    prediction_horizon=(architecture.prediction_horizon if architecture is not None else 1),
-                    window_size=(online.window_size if online is not None else 0),
-                    update_interval=(online.update_interval if online is not None else 0),
-                )
+            command_program = FigureEightCommandProgram.from_config(
+                FigureEightCommandConfig(
+                    width_m=float(demo.width_m), height_m=float(demo.height_m),
+                    speed_m_s=float(demo.speed_m_s),
+                    segment_duration_s=float(demo.segment_duration_s),
+                ),
+                ctrl_dt=float(env.cfg.ctrl_dt),
+                prediction_horizon=(architecture.prediction_horizon if architecture is not None else 1),
+                window_size=(online.window_size if online is not None else 0),
+                update_interval=(online.update_interval if online is not None else 0),
+            )
             command_program.validate_environment(
                 env.cfg, keyboard=playback_cfg.keyboard or bool(getattr(
                     getattr(cfg, "interactive", None), "keyboard", False,
                 )),
             )
-            kind = "checkpoint-calibrated table" if calibrated_path is not None else "ideal geometric table"
-            log(f"Figure-eight demo: open-loop {kind}, cycle={command_program.duration_s:g}s.")
+            log("Figure-eight demo: open-loop, segment-held commands, repeating closed reference route.")
         footprint_recorder = None
         footprints = getattr(getattr(cfg, "demo", None), "footprints", None)
         if footprints is not None and bool(getattr(footprints, "enabled", False)):

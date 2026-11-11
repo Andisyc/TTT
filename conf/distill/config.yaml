@@ -266,7 +266,6 @@ demo:
     height_m: 3.0
     speed_m_s: 0.3
     segment_duration_s: 0.8
-    calibrated_program_path: null  # Frozen checkpoint-bound NPZ; no online pose feedback.
   footprints:
     enabled: false
     max_records: 2048  # Per environment; cleared on that environment's reset.
@@ -278,21 +277,6 @@ demo:
     footprint_radius_m: 0.045
     route_width_m: 0.012
     camera_margin_m: 1.0
-
-gerono_calibration:
-  stage: measure  # Explicit measure | fit (offline) | verify.
-  measurements_path: logs/fada_online/gerono_response.npz
-  program_path: logs/fada_online/gerono_calibrated.npz
-  verification_path: logs/fada_online/gerono_verification.npz
-  forward_commands: [0.12, 0.3, 0.5]
-  yaw_commands: [-0.7, -0.35, 0.0, 0.35, 0.7]
-  hold_s: 8.0
-  time_scales: [1.0, 1.25, 1.5, 2.0]
-  max_nfev: 40
-  max_response_rmse: [0.06, 0.04, 0.1]  # Heldout actual vx/vy/yaw prediction, m/s and rad/s.
-  position_tolerance_m: 0.2
-  heading_tolerance_deg: 10.0
-  cycles: 3
 
 online_adaptation:
   enabled: false

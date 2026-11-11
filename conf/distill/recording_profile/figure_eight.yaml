@@ -17,13 +17,15 @@ demo:
     height_m: 2.0
     speed_m_s: 0.3
     segment_duration_s: 0.8
+    position_gain: 0.8
+    heading_gain: 1.2
   footprints:
     enabled: true
   rendering:
     enabled: true
 
 env:
-  max_episode_seconds: 180.0  # Auto-duration recording checks this against the actual cycle.
+  max_episode_seconds: 180.0  # Longer explicit recordings extend this horizon before env creation.
   reset_base_qvel_limit: 0.0
   standing_reset_base_qvel_limit: 0.0
   noise_config:
@@ -65,5 +67,5 @@ online_adaptation:
 
 video_recording:
   output_path: logs/fada_online/figure_eight.mp4
-  duration_s: null  # Exactly one command-program cycle, including its terminal frame.
+  duration_s: null  # One cycle by default; set e.g. 300.0 to repeat for five minutes.
   show_status_overlay: true

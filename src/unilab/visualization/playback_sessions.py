@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 import numpy as np
 import torch
 
+from unilab.envs.common.rotation import np_yaw_from_quat
+from unilab.visualization.demo_commands import FigureEightCommandProgram, FigureEightCommandTracker
+
 if TYPE_CHECKING:
     from unilab.visualization.footprints import FootprintRecorder
     from unilab.visualization.experiment_recording import ExperimentRecorder
@@ -360,6 +363,13 @@ class FADAPlaybackSession(RslRlPlaybackSession):
         self._recorded_policy_action: torch.Tensor | None = None
         super().__init__(policy=None, **kwargs)
         self.command_control_steps = np.zeros(self.num_envs, dtype=np.int64)
+        self.command_tracker = (
+            FigureEightCommandTracker(
+                command_program, num_envs=self.num_envs,
+                velocity_limits=np.asarray(self.env.cfg.commands.vel_limit),
+            )
+            if isinstance(command_program, FigureEightCommandProgram) else None
+        )
         if footprint_recorder is not None:
             if footprint_recorder.num_envs != self.num_envs:
                 raise ValueError("footprint recorder must match the playback environment rows")
@@ -405,6 +415,10 @@ class FADAPlaybackSession(RslRlPlaybackSession):
             self.official_adapter.reset()
         if self.command_program is not None:
             self.command_control_steps.fill(0)
+        if self.command_tracker is not None:
+            self.command_tracker.reset(
+                self.env.get_base_pos()[:, :2], np_yaw_from_quat(self.env.get_base_quat()),
+            )
         if self.footprint_recorder is not None:
             self.footprint_recorder.reset(self.env.get_foot_contact())
         if self.experiment_recorder is not None:
@@ -416,10 +430,18 @@ class FADAPlaybackSession(RslRlPlaybackSession):
         if self.command_program is not None:
             if self.obs is None:
                 raise RuntimeError("Playback session must be reset before stepping.")
-            self.set_external_command(np.stack([
-                self.command_program.command_at_control_step(step)
-                for step in self.command_control_steps
-            ]))
+            if self.command_tracker is not None:
+                if np.any(self.command_control_steps % self.command_program.segment_steps == 0):
+                    self.command_tracker.update(
+                        self.command_control_steps, self.env.get_base_pos()[:, :2],
+                        np_yaw_from_quat(self.env.get_base_quat()),
+                    )
+                self.set_external_command(self.command_tracker.commands)
+            else:
+                self.set_external_command(np.stack([
+                    self.command_program.command_at_control_step(step)
+                    for step in self.command_control_steps
+                ]))
         recorder = self.experiment_recorder
         if recorder is not None:
             recorder.begin_query(self.info["commands"])
@@ -462,7 +484,13 @@ class FADAPlaybackSession(RslRlPlaybackSession):
             self.command_control_steps += 1
             if self.autoreset_enabled:
                 done_rows = done.detach().cpu().numpy() if isinstance(done, torch.Tensor) else np.asarray(done)
-                self.command_control_steps[np.asarray(done_rows, dtype=bool).reshape(self.num_envs)] = 0
+                reset_rows = np.asarray(done_rows, dtype=bool).reshape(self.num_envs)
+                self.command_control_steps[reset_rows] = 0
+                if self.command_tracker is not None and np.any(reset_rows):
+                    self.command_tracker.reset(
+                        self.env.get_base_pos()[:, :2], np_yaw_from_quat(self.env.get_base_quat()),
+                        reset_rows,
+                    )
         self.step_count += 1
         return self.obs
 

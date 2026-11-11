@@ -176,3 +176,21 @@ collector cancellation followed by a main-process segmentation fault. It loads n
 model or simulator. PASS requires clean debugger termination for the cancelled
 collector and a complete main-process core with registers and native backtrace.
 Formal training arguments and collection request timeouts are unchanged.
+
+## Repeating FADA figure-eight recordings
+
+`recording_profile=figure_eight` uses a closed reference route anchored to the
+robot's initial position and heading. A high-level route follower corrects
+world-position and heading errors, publishing body-frame velocity commands within
+`env.commands.vel_limit`. Corrections remain constant for each
+`demo.figure_eight.segment_duration_s` interval so online-adaptation windows can
+mature. It does not change policy actions, teleport the robot, or reset it at lap
+boundaries. A real episode reset reanchors only the reset environment.
+
+Set `video_recording.duration_s=300` to repeat for five simulation minutes; `null`
+still records exactly one complete cycle. Explicit recordings extend the episode
+timeout before environment creation, avoiding the old 180-second timeout halfway
+through a long demo. Falls and other termination conditions remain unchanged.
+`demo.figure_eight.position_gain` and `heading_gain` configure the feedback.
+This is a pose-feedback route-following demo, not an open-loop policy tracking
+evaluation. Actual tracking quality and uninterrupted walking depend on the policy.

@@ -465,6 +465,15 @@ def create_fada_playback_session(
         env_cfg_override["sim_dt"] = official_profile.sim_dt
     if playback_cfg.keyboard:
         log("Keyboard playback reset: standing command with zero base velocity.")
+    demo = OmegaConf.select(cfg, "demo.figure_eight", default=None)
+    recording_duration = OmegaConf.select(cfg, "video_recording.duration_s", default=None)
+    if (demo is not None and bool(demo.enabled) and recording_duration is not None
+            and bool(OmegaConf.select(cfg, "video_recording.enabled", default=False))):
+        # A long route recording must not restart its phase at the task's old timeout.
+        env_cfg_override["max_episode_seconds"] = max(
+            float(env_cfg_override.get("max_episode_seconds", 0.0)),
+            float(recording_duration) + 1.0,
+        )
     env = create_env(
         cfg,
         num_envs=int(playback_cfg.num_envs),
@@ -494,6 +503,8 @@ def create_fada_playback_session(
                     width_m=float(demo.width_m), height_m=float(demo.height_m),
                     speed_m_s=float(demo.speed_m_s),
                     segment_duration_s=float(demo.segment_duration_s),
+                    position_gain=float(demo.position_gain),
+                    heading_gain=float(demo.heading_gain),
                 ),
                 ctrl_dt=float(env.cfg.ctrl_dt),
                 prediction_horizon=(architecture.prediction_horizon if architecture is not None else 1),
@@ -505,6 +516,7 @@ def create_fada_playback_session(
                     getattr(cfg, "interactive", None), "keyboard", False,
                 )),
             )
+            log("Figure-eight demo: world-pose feedback, segment-held commands, repeating closed route.")
         footprint_recorder = None
         footprints = getattr(getattr(cfg, "demo", None), "footprints", None)
         if footprints is not None and bool(getattr(footprints, "enabled", False)):

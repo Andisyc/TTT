@@ -24,6 +24,7 @@ class FigureEightCommandProgram:
     Geometry is sampled once at construction. The first quarter is resampled
     by arc length; analytic tangents keep its turns in one direction. A small
     speed correction closes the quarter, and reflection supplies the rest.
+    Traverse the first lobe with left turns and the second with right turns.
     Reference points integrate these arcs, closing both position and heading.
     Episode-local progress belongs to the playback session, not this table.
     """
@@ -89,7 +90,7 @@ class FigureEightCommandProgram:
         )
         points = np.vstack((np.zeros(2), np.cumsum(displacement * velocity[:, None], axis=0)))
         points[-1] = target
-        yaw = turn / segment_dt
+        yaw = -turn / segment_dt
         commands = np.column_stack((
             np.concatenate((velocity, velocity[::-1], velocity, velocity[::-1])),
             np.zeros(4 * count),
@@ -104,6 +105,7 @@ class FigureEightCommandProgram:
         program = cls()
         program.commands = commands
         program.reference_points = route @ rotation
+        program.reference_points[:, 1] *= -1.0
         program.ctrl_dt = float(ctrl_dt)
         program.segment_steps = segment_steps
         program.segment_duration_s = segment_dt

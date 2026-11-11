@@ -18,8 +18,8 @@ def test_figure_eight_turns_without_reversals_and_closes(width, height):
     )
     commands = program.commands
     half = len(commands) // 2
-    assert np.all(commands[:half, 2] < 0.0)
-    assert np.all(commands[half:, 2] > 0.0)
+    assert np.all(commands[:half, 2] > 0.0)
+    assert np.all(commands[half:, 2] < 0.0)
     assert np.all(commands[:, 0] > 0.0)
     np.testing.assert_array_equal(commands[:, 1], 0.0)
 
@@ -37,6 +37,11 @@ def test_figure_eight_turns_without_reversals_and_closes(width, height):
     assert abs(headings[-1]) < 1e-12
     assert program.segment_steps == 40
     assert program.segment_index_at_control_step(program.total_control_steps) == 0
+    crossing_step = program.total_control_steps // 2
+    for lap in range(3):
+        crossing = lap * program.total_control_steps + crossing_step
+        assert program.command_at_control_step(crossing - 1)[2] > 0.0
+        assert program.command_at_control_step(crossing)[2] < 0.0
 
 
 def test_double_circle_holds_unequal_durations_and_repeats_at_cycle_boundary():

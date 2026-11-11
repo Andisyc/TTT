@@ -183,7 +183,9 @@ Formal training arguments and collection request timeouts are unchanged.
 sequence. Commands depend only on configuration and episode-local control steps,
 never on measured world position or heading. Each command is held for
 `demo.figure_eight.segment_duration_s` so online-adaptation windows can mature.
-The ideal integrated reference closes in both position and heading every cycle.
+The first lobe turns left and the second turns right; the reference visualization
+uses the same mirrored route. The ideal integrated reference closes in both position
+and heading every cycle.
 Lap boundaries neither reset nor teleport the robot; only an actual episode reset
 restarts that environment's command phase. Reference-route rendering may read pose
 for visualization, but it does not feed back into velocity commands.

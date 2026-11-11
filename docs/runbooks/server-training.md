@@ -181,11 +181,13 @@ Formal training arguments and collection request timeouts are unchanged.
 
 `recording_profile=figure_eight` publishes a repeating open-loop body-frame velocity
 sequence. Commands depend only on configuration and episode-local control steps,
-never on measured world position or heading. Each command is held for
-`demo.figure_eight.segment_duration_s` so online-adaptation windows can mature.
-The first lobe turns left and the second turns right; the reference visualization
-uses the same mirrored route. The ideal integrated reference closes in both position
-and heading every cycle.
+never on measured world position or heading. Nominal commands are held for
+`demo.figure_eight.segment_duration_s`; `time_scale` increases these holds and
+reduces velocities together, using integer control steps. `forward_scale`,
+`left_yaw_scale` and `right_yaw_scale` adjust the actual commands without changing
+the displayed Gerono reference. All default to 1.0. The first lobe turns left and
+the second turns right. Only the unadjusted ideal reference is guaranteed to close;
+non-unit gains require evaluation of the actual checkpoint trajectory.
 Lap boundaries neither reset nor teleport the robot; only an actual episode reset
 restarts that environment's command phase. Reference-route rendering may read pose
 for visualization, but it does not feed back into velocity commands.
@@ -196,4 +198,14 @@ timeout before environment creation, avoiding the old 180-second timeout halfway
 through a long demo. Falls and other termination conditions remain unchanged.
 Actual trajectory closure and uninterrupted walking depend on the policy's velocity
 tracking and accumulated drift; the demo does not hide these errors with pose feedback.
+
+The profile's heuristic gains (`forward_scale=1.1`, `left_yaw_scale=1.18`,
+`right_yaw_scale=1.21`, `time_scale=1.0`) were selected by 12 bounded single-cycle
+trials of `20261111_102618/student_iter_0031.pt`, without changing the policy or
+using pose feedback. The selected single-cycle endpoint error was 0.056 m, but
+three uninterrupted cycles ended 0.394 m from the initial origin. This is a
+best-effort single-cycle preset, not accepted long-horizon closure. These gains
+are checkpoint-specific; use all-one gains for the original geometric commands.
+Server trajectories and trial parameters are retained under
+`logs/fada_online/gerono_heuristic_20261112-012727/`.
 

@@ -16,6 +16,10 @@ class FigureEightCommandConfig:
     height_m: float = 3.0
     speed_m_s: float = 0.3
     segment_duration_s: float = 0.8
+    forward_scale: float = 1.0
+    left_yaw_scale: float = 1.0
+    right_yaw_scale: float = 1.0
+    time_scale: float = 1.0
 
 
 class FigureEightCommandProgram:
@@ -34,7 +38,8 @@ class FigureEightCommandProgram:
         cls, config: FigureEightCommandConfig, *, ctrl_dt: float,
         prediction_horizon: int = 1, window_size: int = 0, update_interval: int = 0,
     ) -> FigureEightCommandProgram:
-        for name in ("width_m", "height_m", "speed_m_s", "segment_duration_s"):
+        for name in ("width_m", "height_m", "speed_m_s", "segment_duration_s",
+                     "forward_scale", "left_yaw_scale", "right_yaw_scale", "time_scale"):
             value = float(getattr(config, name))
             if not np.isfinite(value) or value <= 0.0:
                 raise ValueError(f"demo.figure_eight.{name} must be finite and positive")
@@ -106,6 +111,16 @@ class FigureEightCommandProgram:
         program.commands = commands
         program.reference_points = route @ rotation
         program.reference_points[:, 1] *= -1.0
+        # Keep target geometry fixed; tune only the time-played command sequence.
+        playback_steps = max(1, int(ceil(segment_steps * config.time_scale - 1e-10)))
+        if playback_steps < required_steps:
+            raise ValueError("Tuned figure-eight hold is shorter than the policy/adaptation window")
+        realized_scale = playback_steps / segment_steps
+        commands[:, 0] *= config.forward_scale / realized_scale
+        commands[:len(commands)//2, 2] *= config.left_yaw_scale / realized_scale
+        commands[len(commands)//2:, 2] *= config.right_yaw_scale / realized_scale
+        segment_steps = playback_steps
+        segment_dt = segment_steps * float(ctrl_dt)
         program.ctrl_dt = float(ctrl_dt)
         program.segment_steps = segment_steps
         program.segment_duration_s = segment_dt

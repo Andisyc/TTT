@@ -266,6 +266,10 @@ demo:
     height_m: 3.0
     speed_m_s: 0.3
     segment_duration_s: 0.8
+    forward_scale: 1.0
+    left_yaw_scale: 1.0
+    right_yaw_scale: 1.0
+    time_scale: 1.0  # Slow the same geometry by scaling holds up and velocities down.
   footprints:
     enabled: false
     max_records: 2048  # Per environment; cleared on that environment's reset.

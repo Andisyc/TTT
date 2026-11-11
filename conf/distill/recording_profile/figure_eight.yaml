@@ -17,6 +17,12 @@ demo:
     height_m: 2.0
     speed_m_s: 0.3
     segment_duration_s: 0.8
+    # Best single-cycle trial for student_iter_0031.pt, nominal MuJoCo.
+    # Three-cycle endpoint drift is 0.394 m: not an accepted multi-lap closure.
+    forward_scale: 1.1
+    left_yaw_scale: 1.18
+    right_yaw_scale: 1.21
+    time_scale: 1.0
   footprints:
     enabled: true
   rendering:

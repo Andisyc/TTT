@@ -184,3 +184,35 @@ def test_figure_eight_session_repeats_without_pose_access_or_timeout_phase_reset
         session.env.state.info["commands"][0],
         session.command_program.command_at_control_step(steps - 1),
     )
+
+
+def test_figure_eight_retiming_preserves_geometry_and_independent_lobe_turns():
+    base = FigureEightCommandProgram.from_config(
+        FigureEightCommandConfig(width_m=4.0, height_m=2.0), ctrl_dt=0.02,
+    )
+    slowed = FigureEightCommandProgram.from_config(
+        FigureEightCommandConfig(width_m=4.0, height_m=2.0, time_scale=1.113), ctrl_dt=0.02,
+    )
+    assert slowed.segment_steps == 45
+    pose = np.zeros(3)
+    for command, target in zip(slowed.commands, base.reference_points[1:], strict=True):
+        _advance_planar_pose(pose, command, slowed.segment_duration_s)
+        np.testing.assert_allclose(pose[:2], target, atol=1e-12)
+    np.testing.assert_allclose(pose, 0.0, atol=1e-12)
+    tuned = FigureEightCommandProgram.from_config(
+        FigureEightCommandConfig(width_m=4.0, height_m=2.0, time_scale=1.113,
+                                 left_yaw_scale=1.1, right_yaw_scale=0.9), ctrl_dt=0.02,
+    )
+    np.testing.assert_allclose(tuned.reference_points, base.reference_points, atol=1e-12)
+    half = len(tuned.commands)//2
+    turns = np.degrees(tuned.commands[:, 2].sum()*tuned.segment_duration_s)
+    first_turn = np.degrees(tuned.commands[:half, 2].sum()*tuned.segment_duration_s)
+    assert first_turn == pytest.approx(297.0)
+    assert turns == pytest.approx(54.0)
+
+
+def test_figure_eight_retiming_cannot_shorten_policy_window():
+    with pytest.raises(ValueError, match="shorter"):
+        FigureEightCommandProgram.from_config(
+            FigureEightCommandConfig(time_scale=0.1), ctrl_dt=0.02, prediction_horizon=6,
+        )

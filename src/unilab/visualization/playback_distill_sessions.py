@@ -503,8 +503,6 @@ def create_fada_playback_session(
                     width_m=float(demo.width_m), height_m=float(demo.height_m),
                     speed_m_s=float(demo.speed_m_s),
                     segment_duration_s=float(demo.segment_duration_s),
-                    position_gain=float(demo.position_gain),
-                    heading_gain=float(demo.heading_gain),
                 ),
                 ctrl_dt=float(env.cfg.ctrl_dt),
                 prediction_horizon=(architecture.prediction_horizon if architecture is not None else 1),
@@ -516,7 +514,7 @@ def create_fada_playback_session(
                     getattr(cfg, "interactive", None), "keyboard", False,
                 )),
             )
-            log("Figure-eight demo: world-pose feedback, segment-held commands, repeating closed route.")
+            log("Figure-eight demo: open-loop, segment-held commands, repeating closed reference route.")
         footprint_recorder = None
         footprints = getattr(getattr(cfg, "demo", None), "footprints", None)
         if footprints is not None and bool(getattr(footprints, "enabled", False)):

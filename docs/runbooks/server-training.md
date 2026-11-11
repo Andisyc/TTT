@@ -179,18 +179,18 @@ Formal training arguments and collection request timeouts are unchanged.
 
 ## Repeating FADA figure-eight recordings
 
-`recording_profile=figure_eight` uses a closed reference route anchored to the
-robot's initial position and heading. A high-level route follower corrects
-world-position and heading errors, publishing body-frame velocity commands within
-`env.commands.vel_limit`. Corrections remain constant for each
-`demo.figure_eight.segment_duration_s` interval so online-adaptation windows can
-mature. It does not change policy actions, teleport the robot, or reset it at lap
-boundaries. A real episode reset reanchors only the reset environment.
+`recording_profile=figure_eight` publishes a repeating open-loop body-frame velocity
+sequence. Commands depend only on configuration and episode-local control steps,
+never on measured world position or heading. Each command is held for
+`demo.figure_eight.segment_duration_s` so online-adaptation windows can mature.
+The ideal integrated reference closes in both position and heading every cycle.
+Lap boundaries neither reset nor teleport the robot; only an actual episode reset
+restarts that environment's command phase. Reference-route rendering may read pose
+for visualization, but it does not feed back into velocity commands.
 
 Set `video_recording.duration_s=300` to repeat for five simulation minutes; `null`
 still records exactly one complete cycle. Explicit recordings extend the episode
 timeout before environment creation, avoiding the old 180-second timeout halfway
 through a long demo. Falls and other termination conditions remain unchanged.
-`demo.figure_eight.position_gain` and `heading_gain` configure the feedback.
-This is a pose-feedback route-following demo, not an open-loop policy tracking
-evaluation. Actual tracking quality and uninterrupted walking depend on the policy.
+Actual trajectory closure and uninterrupted walking depend on the policy's velocity
+tracking and accumulated drift; the demo does not hide these errors with pose feedback.

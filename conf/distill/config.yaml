@@ -266,8 +266,6 @@ demo:
     height_m: 3.0
     speed_m_s: 0.3
     segment_duration_s: 0.8
-    position_gain: 0.8  # World-position feedback for the demo route follower.
-    heading_gain: 1.2  # Heading feedback, sampled once per held command segment.
   footprints:
     enabled: false
     max_records: 2048  # Per environment; cleared on that environment's reset.

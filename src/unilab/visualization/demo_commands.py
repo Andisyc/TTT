@@ -16,8 +16,6 @@ class FigureEightCommandConfig:
     height_m: float = 3.0
     speed_m_s: float = 0.3
     segment_duration_s: float = 0.8
-    position_gain: float = 0.8
-    heading_gain: float = 1.2
 
 
 class FigureEightCommandProgram:
@@ -35,8 +33,7 @@ class FigureEightCommandProgram:
         cls, config: FigureEightCommandConfig, *, ctrl_dt: float,
         prediction_horizon: int = 1, window_size: int = 0, update_interval: int = 0,
     ) -> FigureEightCommandProgram:
-        for name in ("width_m", "height_m", "speed_m_s", "segment_duration_s",
-                     "position_gain", "heading_gain"):
+        for name in ("width_m", "height_m", "speed_m_s", "segment_duration_s"):
             value = float(getattr(config, name))
             if not np.isfinite(value) or value <= 0.0:
                 raise ValueError(f"demo.figure_eight.{name} must be finite and positive")
@@ -107,12 +104,6 @@ class FigureEightCommandProgram:
         program = cls()
         program.commands = commands
         program.reference_points = route @ rotation
-        program.reference_headings = np.concatenate((
-            [0.0], np.cumsum(commands[:, 2] * segment_dt),
-        ))
-        program.reference_headings[-1] = 0.0
-        program.position_gain = config.position_gain
-        program.heading_gain = config.heading_gain
         program.ctrl_dt = float(ctrl_dt)
         program.segment_steps = segment_steps
         program.segment_duration_s = segment_dt
@@ -120,7 +111,6 @@ class FigureEightCommandProgram:
         program.total_control_steps = len(commands) * segment_steps
         program.commands.setflags(write=False)
         program.reference_points.setflags(write=False)
-        program.reference_headings.setflags(write=False)
         return program
 
     def segment_index_at_control_step(self, control_step: int) -> int:
@@ -131,17 +121,6 @@ class FigureEightCommandProgram:
     def command_at_control_step(self, control_step: int) -> np.ndarray:
         return self.commands[self.segment_index_at_control_step(control_step)].copy()
 
-    def reference_at_control_step(self, control_step: int) -> np.ndarray:
-        """Return episode-local reference x/y/yaw, repeating at the closed seam."""
-        index = self.segment_index_at_control_step(control_step)
-        elapsed = (int(control_step) % self.segment_steps) * self.ctrl_dt
-        velocity, _, yaw_rate = self.commands[index]
-        turn = yaw_rate * elapsed
-        heading = self.reference_headings[index]
-        distance = velocity * elapsed * np.sinc(turn / (2.0 * np.pi))
-        middle = heading + turn / 2.0
-        xy = self.reference_points[index] + distance * np.array([np.cos(middle), np.sin(middle)])
-        return np.array([xy[0], xy[1], heading + turn])
 
     def time_at_control_step(self, control_step: int) -> float:
         self.segment_index_at_control_step(control_step)
@@ -152,67 +131,6 @@ class FigureEightCommandProgram:
         _validate_demo_commands(self.commands, env_cfg, keyboard=keyboard)
 
 
-class FigureEightCommandTracker:
-    """World-pose feedback sampled only at the program's command-hold boundaries.
-
-    This is a high-level demo route follower, not a change to policy actions.
-    Each environment keeps its reset pose as the fixed origin across all laps.
-    """
-
-    def __init__(
-        self, program: FigureEightCommandProgram, *, num_envs: int, velocity_limits: np.ndarray,
-    ) -> None:
-        self.program = program
-        self.velocity_limits = np.asarray(velocity_limits, dtype=np.float64).copy()
-        self.origin_xy = np.zeros((num_envs, 2), dtype=np.float64)
-        self.origin_yaw = np.zeros(num_envs, dtype=np.float64)
-        self.commands = np.zeros((num_envs, 3), dtype=np.float64)
-        self._sampled_segments = np.full(num_envs, -1, dtype=np.int64)
-
-    def reset(
-        self, position_xy: np.ndarray, yaw: np.ndarray, rows: np.ndarray | None = None,
-    ) -> None:
-        selected = slice(None) if rows is None else rows
-        self.origin_xy[selected] = position_xy[selected]
-        self.origin_yaw[selected] = yaw[selected]
-        self._sampled_segments[selected] = -1
-
-    def update(
-        self, control_steps: np.ndarray, position_xy: np.ndarray, yaw: np.ndarray,
-    ) -> np.ndarray:
-        """Return borrowed command rows, constant until the next segment."""
-        program = self.program
-        for row, step in enumerate(control_steps):
-            segment = int(step) // program.segment_steps
-            if segment == self._sampled_segments[row]:
-                continue
-            reference = program.reference_at_control_step(step)
-            angle = self.origin_yaw[row]
-            cosine, sine = np.cos(angle), np.sin(angle)
-            target_xy = self.origin_xy[row] + np.array([
-                cosine * reference[0] - sine * reference[1],
-                sine * reference[0] + cosine * reference[1],
-            ])
-            error = target_xy - position_xy[row]
-            cosine, sine = np.cos(yaw[row]), np.sin(yaw[row])
-            error_body = np.array([
-                cosine * error[0] + sine * error[1],
-                -sine * error[0] + cosine * error[1],
-            ])
-            heading_error = reference[2] + angle - yaw[row]
-            heading_error = np.arctan2(np.sin(heading_error), np.cos(heading_error))
-            nominal = program.command_at_control_step(step)
-            self.commands[row, :2] = (
-                nominal[0] * np.array([np.cos(heading_error), np.sin(heading_error)])
-                + program.position_gain * error_body
-            )
-            self.commands[row, 2] = nominal[2] + program.heading_gain * heading_error
-            np.clip(
-                self.commands[row], self.velocity_limits[0], self.velocity_limits[1],
-                out=self.commands[row],
-            )
-            self._sampled_segments[row] = segment
-        return self.commands
 
 
 @dataclass(frozen=True)

@@ -17,8 +17,6 @@ demo:
     height_m: 2.0
     speed_m_s: 0.3
     segment_duration_s: 0.8
-    position_gain: 0.8
-    heading_gain: 1.2
   footprints:
     enabled: true
   rendering:

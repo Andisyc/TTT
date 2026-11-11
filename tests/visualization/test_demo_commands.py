@@ -8,7 +8,6 @@ from unilab.visualization.demo_commands import (
     DoubleCircleCommandProgram,
     FigureEightCommandConfig,
     FigureEightCommandProgram,
-    FigureEightCommandTracker,
 )
 
 
@@ -73,83 +72,26 @@ def _advance_planar_pose(pose, command, dt, *, speed_scale=1.0, yaw_bias=0.0):
     pose[2] += turn
 
 
-def test_figure_eight_repeats_closed_pose_without_reanchoring_between_laps():
+def test_figure_eight_open_loop_repeats_closed_pose_and_holds_commands():
     program = FigureEightCommandProgram.from_config(
         FigureEightCommandConfig(width_m=4.0, height_m=2.0), ctrl_dt=0.02,
     )
-    tracker = FigureEightCommandTracker(program, num_envs=1, velocity_limits=_VELOCITY_LIMITS)
     origin = np.array([2.0, -1.0, 0.7])
     pose = origin.copy()
-    tracker.reset(pose[None, :2], pose[None, 2])
+    previous_command = None
     for step in range(3 * program.total_control_steps):
-        command = tracker.update(np.array([step]), pose[None, :2], pose[None, 2])[0]
-        np.testing.assert_allclose(command, program.command_at_control_step(step), atol=1e-12)
+        command = program.command_at_control_step(step)
+        if step % program.segment_steps:
+            np.testing.assert_array_equal(command, previous_command)
+        previous_command = command
         _advance_planar_pose(pose, command, program.ctrl_dt)
         if (step + 1) % program.total_control_steps == 0:
             np.testing.assert_allclose(pose, origin, atol=1e-10)
 
 
-def test_figure_eight_pose_feedback_bounds_drift_over_eight_laps():
-    program = FigureEightCommandProgram.from_config(
-        FigureEightCommandConfig(width_m=4.0, height_m=2.0), ctrl_dt=0.02,
-    )
-    tracker = FigureEightCommandTracker(program, num_envs=1, velocity_limits=_VELOCITY_LIMITS)
-    pose = np.zeros(3)
-    open_loop_pose = np.zeros(3)
-    tracker.reset(pose[None, :2], pose[None, 2])
-    corrected_errors, uncorrected_errors = [], []
-    for step in range(8 * program.total_control_steps):
-        corrected = tracker.update(np.array([step]), pose[None, :2], pose[None, 2])[0]
-        _advance_planar_pose(
-            pose, corrected, program.ctrl_dt, speed_scale=0.85, yaw_bias=0.03,
-        )
-        _advance_planar_pose(
-            open_loop_pose, program.command_at_control_step(step), program.ctrl_dt,
-            speed_scale=0.85, yaw_bias=0.03,
-        )
-        if (step + 1) % program.total_control_steps == 0:
-            corrected_errors.append(np.linalg.norm(pose[:2]))
-            uncorrected_errors.append(np.linalg.norm(open_loop_pose[:2]))
-            assert abs(np.arctan2(np.sin(pose[2]), np.cos(pose[2]))) < 0.1
-    assert max(corrected_errors) < 0.15
-    assert max(uncorrected_errors) > 0.5
 
 
-def test_figure_eight_feedback_holds_commands_then_corrects_within_limits():
-    program = FigureEightCommandProgram.from_config(
-        FigureEightCommandConfig(width_m=4.0, height_m=2.0), ctrl_dt=0.02,
-    )
-    tracker = FigureEightCommandTracker(program, num_envs=1, velocity_limits=_VELOCITY_LIMITS)
-    positions, yaw = np.zeros((1, 2)), np.zeros(1)
-    tracker.reset(positions, yaw)
-    held = tracker.update(np.array([0]), positions, yaw).copy()
-    displaced = np.array([[100.0, -100.0]])
-    np.testing.assert_array_equal(tracker.update(np.array([1]), displaced, yaw), held)
-    corrected = tracker.update(np.array([program.segment_steps]), displaced, yaw)
-    assert corrected[0, 0] == _VELOCITY_LIMITS[0, 0]
-    assert corrected[0, 1] == _VELOCITY_LIMITS[1, 1]
-    assert _VELOCITY_LIMITS[0, 2] <= corrected[0, 2] < 0.0
-
-
-def test_figure_eight_reset_reanchors_only_the_reset_environment():
-    program = FigureEightCommandProgram.from_config(
-        FigureEightCommandConfig(width_m=4.0, height_m=2.0), ctrl_dt=0.02,
-    )
-    tracker = FigureEightCommandTracker(program, num_envs=2, velocity_limits=_VELOCITY_LIMITS)
-    positions, yaw = np.zeros((2, 2)), np.zeros(2)
-    tracker.reset(positions, yaw)
-    tracker.update(np.array([0, 0]), positions, yaw)
-    positions[:] = [[10.0, 2.0], [-3.0, 1.0]]
-    yaw[:] = [np.pi / 2.0, 0.0]
-    tracker.update(np.array([40, 40]), positions, yaw)
-    second_command = tracker.commands[1].copy()
-    tracker.reset(positions, yaw, np.array([True, False]))
-    command = tracker.update(np.array([0, 41]), positions, yaw)
-    np.testing.assert_allclose(command[0], program.command_at_control_step(0), atol=1e-12)
-    np.testing.assert_array_equal(command[1], second_command)
-
-
-def test_figure_eight_session_keeps_its_origin_and_phase_during_long_recording():
+def test_figure_eight_session_repeats_without_pose_access_or_timeout_phase_reset():
     from types import SimpleNamespace
 
     import torch
@@ -178,11 +120,6 @@ def test_figure_eight_session_keeps_its_origin_and_phase_during_long_recording()
         def refresh_state(self):
             self.observation = np.concatenate((self.pose, self.state.info["commands"][0]))[None, :]
 
-        def get_base_pos(self):
-            return np.array([[*self.pose[:2], 0.75]])
-
-        def get_base_quat(self):
-            return np.array([[np.cos(self.pose[2] / 2), 0.0, 0.0, np.sin(self.pose[2] / 2)]])
 
     class PlanarWrapper:
         def __init__(self, env, **kwargs):
@@ -211,7 +148,7 @@ def test_figure_eight_session_keeps_its_origin_and_phase_during_long_recording()
         "training": {"task_name": "test"},
         "demo": {"figure_eight": {
             "enabled": True, "width_m": 4.0, "height_m": 2.0, "speed_m_s": 0.3,
-            "segment_duration_s": 0.8, "position_gain": 0.8, "heading_gain": 1.2,
+            "segment_duration_s": 0.8,
         }},
         "video_recording": {"enabled": True, "duration_s": 220.0},
     })
@@ -238,4 +175,7 @@ def test_figure_eight_session_keeps_its_origin_and_phase_during_long_recording()
     for _ in range(steps):
         session.step_once()
     assert session.command_control_steps[0] == steps
-    assert np.linalg.norm(session.env.pose[:2]) < 0.15
+    np.testing.assert_allclose(
+        session.env.state.info["commands"][0],
+        session.command_program.command_at_control_step(steps - 1),
+    )

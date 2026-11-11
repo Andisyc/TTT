@@ -161,3 +161,18 @@ before terminating it.
 A responsive launch proves only that the selected process can start inside this resource envelope.
 It does not prove convergence, policy quality, checkpoint superiority, Planner-IDM readiness, or
 deployment safety.
+
+## Oracle FADA native failure capture
+
+`scripts/deploy/run_fada_failure_capture.py` arms both the training main process and
+collectors for fatal signals only (`SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGABRT`, `SIGFPE`).
+It does not install Python exception-formatting or opcode breakpoints: ordinary
+handled exceptions must not pause collection. `SIGTERM`, `SIGINT`, and `SIGHUP` pass
+through for normal cancellation. Python exceptions retain their traceback/fallback
+report but no longer trigger a pre-unwind core capture.
+
+On the Linux x86-64/CPython 3.11 training server, `--self-test` runs a synthetic
+collector cancellation followed by a main-process segmentation fault. It loads no
+model or simulator. PASS requires clean debugger termination for the cancelled
+collector and a complete main-process core with registers and native backtrace.
+Formal training arguments and collection request timeouts are unchanged.

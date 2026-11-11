@@ -1,4 +1,4 @@
-"""Opt-in native-breakpoint arming and a post-unwind diagnostic fallback."""
+"""Opt-in fatal-signal capture arming and a post-unwind diagnostic fallback."""
 from __future__ import annotations
 
 import ctypes
@@ -17,7 +17,7 @@ _armed = False
 
 
 def arm_collection_capture() -> None:
-    """Pause once on the cold path until the supervisor installs native breakpoints."""
+    """Pause once on the cold path until the supervisor arms fatal-signal capture."""
     global _armed
     root_value = os.environ.get("UNILAB_FADA_CAPTURE_ROOT")
     if not root_value or _armed:
@@ -38,7 +38,7 @@ def arm_collection_capture() -> None:
     os.kill(os.getpid(), signal.SIGSTOP)
     acknowledgement = directory / "armed.json"
     if not acknowledgement.is_file() or json.loads(acknowledgement.read_text())["pid"] != os.getpid():
-        raise RuntimeError("native pre-unwind capture was not armed; collection refused")
+        raise RuntimeError("native fatal-signal capture was not armed; execution refused")
     _armed = True
 
 

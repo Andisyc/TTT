@@ -1,11 +1,10 @@
-"""Run official Oracle training with pre-unwind native error capture.
+"""Run official Oracle training with fatal-signal capture.
 
-The training main process is armed before Hydra runs and watches fatal signals
-without formatter breakpoints. Collectors retain pre-unwind target-error capture.
-Run --self-test --self-test-case training-main-signal --full-training to verify
-that a normal collector exit does not end main-process coverage. Save registers
-and core, then kill the failed process; never retry or change training semantics.
-Private captures contain process memory.
+Arm both training and collector processes without Python exception breakpoints.
+Run --self-test to verify collector termination and main-process SIGSEGV capture
+without loading models or simulation. Save registers and core, then kill the
+failed process; never retry or change training semantics. Private captures
+contain process memory.
 """
 from __future__ import annotations
 
@@ -34,12 +33,9 @@ def build_layout(root: Path) -> Path:
         "_PyRuntimeState": ["gilstate.tstate_current"],
         "PyThreadState": ["cframe"],
         "_PyCFrame": ["current_frame"],
-        "_PyInterpreterFrame": ["f_code", "previous", "prev_instr", "stacktop", "localsplus"],
-        "PyCodeObject": ["co_name", "co_filename", "co_firstlineno", "co_nlocalsplus",
-                         "co_stacksize", "co_code_adaptive"],
+        "_PyInterpreterFrame": ["f_code", "previous", "prev_instr"],
+        "PyCodeObject": ["co_name", "co_filename", "co_firstlineno", "co_code_adaptive"],
         "PyVarObject": ["ob_size"],
-        "PyObject": ["ob_type"],
-        "PyTypeObject": ["tp_name"],
         "PyASCIIObject": ["length", "state"],
         "PyUnicodeObject": ["data"],
     }
@@ -135,16 +131,12 @@ def main() -> int:
     parser.add_argument("--capture-root", type=Path, required=True)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--self-test-case", choices=("target-error", "training-main-signal"),
-                        default="target-error")
     parser.add_argument("--full-training", action="store_true")
     parser.add_argument("--allocator", choices=("default", "debug"), default="default")
     parser.add_argument("--seconds", type=int, default=600)
     parser.add_argument("--core-gib", type=int, default=20)
     args = parser.parse_args()
     root, repo = args.capture_root, args.repo.resolve()
-    if args.self_test_case != "target-error" and not args.self_test:
-        parser.error("--self-test-case requires --self-test")
     if not root.is_absolute() or root == repo or root.exists():
         parser.error("--capture-root must be a new absolute directory, not the repo root")
     if args.seconds < 0 or args.core_gib <= 0 or (args.seconds == 0 and not args.full_training):
@@ -177,29 +169,21 @@ def main() -> int:
     env["PYTHONPATH"] = os.pathsep.join((str(overlay), str(repo / "src")))
     if args.self_test:
         helper = repo / "src/unilab/algos/torch/distill/fada/failure_capture.py"
-        windows = repo / "src/unilab/algos/torch/distill/fada/windows.py"
-        fixture_source = "def _validate_records():\n    manager = enumerate((1,))\n    with manager:\n        pass\n"
         bootstrap = (
-            "import ctypes, importlib.util, os, subprocess, sys\n"
+            "import ctypes, importlib.util, os, signal, subprocess, sys\n"
             f"assert os.environ.get('UNILAB_FADA_CAPTURE_ONLY') == {None if args.full_training else '1'!r}\n"
             f"spec=importlib.util.spec_from_file_location('capture_fixture', {str(helper)!r})\n"
             "module=importlib.util.module_from_spec(spec)\nspec.loader.exec_module(module)\n"
             "module.arm_collection_capture()\n"
         )
-        if args.self_test_case == "training-main-signal":
-            collector = bootstrap + "print('COLLECTOR_COMPLETED', flush=True)\n"
-            fixture = (
-                bootstrap
-                + f"subprocess.run([sys.executable, '-u', '-c', {collector!r}], check=True)\n"
-                + "ctypes.string_at(0)\n"
-            )
-        else:
-            fixture = (
-                bootstrap + "namespace={}\n"
-                + f"exec(compile({fixture_source!r}, {str(windows)!r}, 'exec'), namespace)\n"
-                + "try:\n    namespace['_validate_records']()\nexcept Exception:\n"
-                + "    print('UNWOUND_SENTINEL', flush=True)\n    raise\n"
-            )
+        collector = bootstrap + "os.kill(os.getpid(), signal.SIGTERM)\n"
+        fixture = (
+            bootstrap
+            + f"child=subprocess.run([sys.executable, '-u', '-c', {collector!r}])\n"
+            + "assert child.returncode == -signal.SIGTERM\n"
+            + "print('COLLECTOR_TERMINATED', flush=True)\n"
+            + "ctypes.string_at(0)\n"
+        )
         command = [sys.executable, "-u", "-c", fixture]
     else:
         command = [sys.executable, "-u", "scripts/train_distill.py", "--config-name=oracle_fada",
@@ -212,7 +196,7 @@ def main() -> int:
                    f"training.fada.async_artifact_dir={root}/source_batches"]
     identity = {
         "command": command,
-        "observer": f"main-native-signals; collector-native-error-entry; allocator={args.allocator}",
+        "observer": f"native-fatal-signals-only; allocator={args.allocator}",
         "python": sys.version, "executable": sys.executable,
         "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
         "limits": {"seconds": args.seconds, "arm_seconds": 30, "capture_seconds": 90,
@@ -245,8 +229,7 @@ def main() -> int:
                         seen.add(path)
                         ready = json.loads(path.read_text())
                         main_process = int(ready["pid"]) == process.pid
-                        target_fixture = args.self_test and args.self_test_case == "target-error"
-                        ready["role"] = "training_main" if main_process and not target_fixture else "collector"
+                        ready["role"] = "training_main" if main_process else "collector"
                         sessions.append(start_debugger(ready, gdb, script, layout))
                 now = time.monotonic()
                 for session in sessions:
@@ -300,29 +283,18 @@ def main() -> int:
             if not path.is_file():
                 continue
             report = json.loads(path.read_text())
-            stack = report.get("value_stack", {})
             common_ok = (capture["core_complete"] and capture["gdb_exitcode"] == 0
                          and process.returncode == -signal.SIGKILL and not supervisor_error
                          and not timed_out)
-            if args.self_test_case == "training-main-signal":
-                collectors = [item for item in captures if item["role"] == "collector"]
-                fixture_ok = (
-                    common_ok and capture["role"] == "training_main"
-                    and report.get("phase") == "native_signal" and report.get("signal") == "SIGSEGV"
-                    and bool(report.get("registers")) and bool(report.get("native_backtrace"))
-                    and len(collectors) == 1 and collectors[0]["gdb_exitcode"] == 0
-                    and not collectors[0]["core_complete"]
-                    and "COLLECTOR_COMPLETED" in (root / "train.log").read_text(errors="replace")
-                )
-            else:
-                fixture_ok = (
-                    common_ok and report.get("phase") == "pre_exception_format"
-                    and report.get("target_frame", {}).get("function") == "_validate_records"
-                    and report.get("code_snapshot", {}).get("canonical_opname") == "BEFORE_WITH"
-                    and stack.get("pointer_resolved") is True
-                    and stack.get("top_objects", [{}])[0].get("type") == "enumerate"
-                    and "UNWOUND_SENTINEL" not in (root / "train.log").read_text(errors="replace")
-                )
+            collectors = [item for item in captures if item["role"] == "collector"]
+            fixture_ok = (
+                common_ok and capture["role"] == "training_main"
+                and report.get("phase") == "native_signal" and report.get("signal") == "SIGSEGV"
+                and bool(report.get("registers")) and bool(report.get("native_backtrace"))
+                and len(collectors) == 1 and collectors[0]["gdb_exitcode"] == 0
+                and not collectors[0]["core_complete"] and "debugger_error" not in collectors[0]
+                and "COLLECTOR_TERMINATED" in (root / "train.log").read_text(errors="replace")
+            )
             if fixture_ok:
                 break
     result = {

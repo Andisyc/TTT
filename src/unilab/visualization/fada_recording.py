@@ -114,14 +114,17 @@ def _annotate_frame(
 
 
 @contextmanager
-def capture_fada_trial(session: Any, args: Any, config: FADAVideoRecordingConfig, *, label: str):
+def capture_fada_trial(
+    session: Any, args: Any, config: FADAVideoRecordingConfig, *, label: str,
+    render_config: FADADemoRenderConfig | None = None,
+):
     """Record the trial owner's steps without stepping or resetting the session."""
     model = _load_viewer_model(session.env, use_env_visual_model=args.use_env_visual_model)
     model.vis.global_.offwidth = max(model.vis.global_.offwidth, config.width)
     model.vis.global_.offheight = max(model.vis.global_.offheight, config.height)
     data = mujoco.MjData(model)
     camera = mujoco.MjvCamera()
-    rendering = FADAPlaybackRendering(session, model, args)
+    rendering = FADAPlaybackRendering(session, model, args, render_config)
     rendering.initialize_camera(camera)
     font = ImageFont.load_default(size=max(12, config.height // 40))
     frame_index = 0

@@ -85,6 +85,16 @@ reported separately; they are not interpreted as falls. For normalized errors,
 the optional reference must match the trial seed (use `${seed}` in the reference
 path if needed) and the evaluator's existing compatibility checks.
 
+Timing overrides are optional: `--duration-s 130 --attach-time-s 10` records
+130 seconds total, attaches the payload at 10 seconds, and evaluates the following
+120 seconds. `--attach-time-s` is for loaded protocols and also moves the online
+warm-up boundary to after attachment, using the protocol's explicit
+`timing_ctrl_dt_s`. The trial checks that this period matches the checkpoint's
+environment before stepping. `--duration-s` extends the evaluation endpoint and
+episode timeout together; unloaded evaluation retains its configured start time.
+Without either option, the YAML timing is unchanged. Dry-run output shows the
+resolved duration, attachment, warm-up and evaluation interval.
+
 ## Isolated MuJoCo native lifecycle repair
 
 `patches/mujoco-uni-3.8.0-lifecycle.patch` targets the exact source archive locked

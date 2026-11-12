@@ -6,6 +6,7 @@ seed: 0
 device: cuda
 command: [0.6, 0.0, 0.0]
 duration_s: 30.0
+timing_ctrl_dt_s: 0.02  # Seconds-to-steps conversion; checked against the loaded environment.
 env_overrides:
   max_episode_seconds: 31.0
   reset_base_qvel_limit: 0.0

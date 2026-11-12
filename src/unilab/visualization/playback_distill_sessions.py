@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -467,6 +467,51 @@ def create_fada_playback_session(
         log("Keyboard playback reset: standing command with zero base velocity.")
     demo = OmegaConf.select(cfg, "demo.figure_eight", default=None)
     recording_duration = OmegaConf.select(cfg, "video_recording.duration_s", default=None)
+    slalom_node = OmegaConf.select(cfg, "demo.slalom", default=None)
+    slalom_program = None
+    if slalom_node is not None and bool(slalom_node.enabled):
+        if task_name != "G1WalkFlat" or playback_cfg.keyboard or online_enabled:
+            raise ValueError("Slalom requires frozen, non-keyboard G1WalkFlat playback")
+        if demo is not None and bool(demo.enabled):
+            raise ValueError("Slalom and figure-eight cannot both own velocity commands")
+        if bool(OmegaConf.select(cfg, "env.runtime_payload.enabled", default=False)):
+            raise ValueError("The nominal slalom Demo requires runtime_payload.enabled=false")
+        from dataclasses import replace
+
+        from unilab.assets import ASSETS_ROOT_PATH
+        from unilab.base.scene import SceneCfg, ScenePoleCfg
+        from unilab.visualization.slalom import SlalomCommandProgram, SlalomConfig
+
+        slalom_cfg = SlalomConfig(**cast(dict[str, Any], OmegaConf.to_container(slalom_node, resolve=True)))
+        slalom_program = SlalomCommandProgram.from_config(
+            slalom_cfg, ctrl_dt=float(env_cfg_override.get("ctrl_dt", 0.02)),
+            prediction_horizon=(architecture.prediction_horizon if architecture is not None else 1),
+        )
+        poles = [
+            ScenePoleCfg(
+                name=f"slalom_pole_{i+1}", position=(float(x), float(y), slalom_cfg.pole_height_m/2),
+                radius=slalom_cfg.pole_radius_m, height=slalom_cfg.pole_height_m,
+                mass=slalom_cfg.pole_mass_kg, friction=slalom_cfg.pole_friction,
+            )
+            for i, (x, y) in enumerate(slalom_program.pole_centers)
+        ]
+        scene = env_cfg_override.get("scene")
+        if isinstance(scene, SceneCfg):
+            if scene.task_poles:
+                raise ValueError("Slalom cannot replace an existing task-pole layout")
+            env_cfg_override["scene"] = replace(scene, task_poles=poles)
+        else:
+            scene = dict(scene) if scene is not None else {
+                "model_file": str(ASSETS_ROOT_PATH / "robots/g1/scene_flat.xml"),
+            }
+            if scene.get("task_poles"):
+                raise ValueError("Slalom cannot replace an existing task-pole layout")
+            env_cfg_override["scene"] = {**scene, "task_poles": poles}
+        env_cfg_override["max_episode_seconds"] = max(
+            float(env_cfg_override.get("max_episode_seconds", 0)),
+            slalom_program.duration_s + slalom_cfg.settle_s + 1,
+            float(recording_duration or 0) + 1,
+        )
     if (demo is not None and bool(demo.enabled) and recording_duration is not None
             and bool(OmegaConf.select(cfg, "video_recording.enabled", default=False))):
         # A long route recording must not restart its phase at the task's old timeout.
@@ -490,7 +535,7 @@ def create_fada_playback_session(
             from unilab.algos.torch.distill.fada.oracle_deployment import validate_oracle_student_environment
             validate_oracle_student_environment(oracle_source_profile, env)
             log(f"Oracle student source controls: sim_dt={env.cfg.sim_dt}, ctrl_dt={env.cfg.ctrl_dt}")
-        command_program = None
+        command_program = slalom_program
         demo = getattr(getattr(cfg, "demo", None), "figure_eight", None)
         if demo is not None and bool(getattr(demo, "enabled", False)):
             from unilab.visualization.demo_commands import (
@@ -519,6 +564,10 @@ def create_fada_playback_session(
                 )),
             )
             log("Figure-eight demo: open-loop, segment-held commands, repeating closed reference route.")
+        if slalom_program is not None:
+            slalom_program.validate_environment(env.cfg, keyboard=playback_cfg.keyboard)
+            log(f"Slalom demo: {len(slalom_program.pole_centers)} poles, open-loop single pass, "
+                f"walking duration={slalom_program.duration_s:g}s; no pose feedback.")
         footprint_recorder = None
         footprints = getattr(getattr(cfg, "demo", None), "footprints", None)
         if footprints is not None and bool(getattr(footprints, "enabled", False)):

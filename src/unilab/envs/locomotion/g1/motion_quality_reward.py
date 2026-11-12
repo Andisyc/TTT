@@ -127,7 +127,8 @@ class MotionQualityRewardProvider:
         self.feet_ids = backend.get_body_ids(["left_ankle_roll_link", "right_ankle_roll_link"])
         self.site_ids = backend.get_site_ids(["left_foot", "right_foot"])
         body_names = backend.get_body_names()
-        self.body_ids = np.arange(1, len(body_names), dtype=np.int32)
+        robot_body_ids = backend.get_robot_body_ids()
+        self.body_ids = np.asarray(robot_body_ids[robot_body_ids != 0], dtype=np.int32)
         self.feet_columns = np.asarray([int(np.flatnonzero(self.body_ids == i)[0]) for i in self.feet_ids])
         self.undesired_columns = np.asarray([
             i for i, body_id in enumerate(self.body_ids)

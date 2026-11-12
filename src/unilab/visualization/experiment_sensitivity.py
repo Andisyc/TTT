@@ -16,6 +16,47 @@ from unilab.visualization.experiment_execution import run_oat_experiment
 PARAMETERS = {"T": "update_interval", "sigma": "sigma", "gamma": "gamma"}
 
 
+def configure_sensitivity_timing(
+    protocol: DictConfig, *, duration_s: float | None = None, attach_time_s: float | None = None,
+) -> DictConfig:
+    """Keep video, episode limit, warm-up and evaluation aligned when retiming."""
+    result = OmegaConf.merge(protocol)
+    if duration_s is None and attach_time_s is None:
+        return result
+    dt = float(result.get("timing_ctrl_dt_s", 0.0))
+    if not math.isfinite(dt) or dt <= 0:
+        raise ValueError("timing overrides require explicit positive timing_ctrl_dt_s in the protocol")
+    duration = float(result.duration_s if duration_s is None else duration_s)
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("--duration-s must be finite and positive")
+    end = math.ceil(duration / dt - 1e-9) * dt
+    if attach_time_s is not None:
+        if not result.payload.enabled:
+            raise ValueError("--attach-time-s requires a loaded protocol")
+        if not math.isfinite(attach_time_s) or attach_time_s < 0:
+            raise ValueError("--attach-time-s must be finite and nonnegative")
+        result.payload.attach_time_s = attach_time_s
+        # Runtime payloads attach before physics at ceil(attach_time / ctrl_dt).
+        result.online.warmup_steps = math.ceil(attach_time_s / dt) + 1
+    if result.payload.enabled:
+        attachment = math.ceil(float(result.payload.attach_time_s) / dt) * dt
+        if attachment >= end:
+            raise ValueError("payload attachment must occur before the recording ends")
+        result.evaluation.relative_to = "payload"
+        result.evaluation.payload_event_index = 0
+        result.evaluation.start_s = 0.0
+        result.evaluation.end_s = end - attachment
+    else:
+        if end <= float(result.evaluation.start_s):
+            raise ValueError("recording must extend beyond the unloaded evaluation start")
+        result.evaluation.relative_to = "run_start"
+        result.evaluation.end_s = end
+    result.duration_s = duration
+    current_limit = result.env_overrides.get("max_episode_seconds")
+    result.env_overrides.max_episode_seconds = max(float(current_limit or 0.0), end + dt)
+    return result
+
+
 def plan_sensitivity_trials(
     protocol: DictConfig, *, param: str, values: Sequence[float], repeats: int,
     first_seed: int, output_dir: Path,

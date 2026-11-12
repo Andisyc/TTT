@@ -193,6 +193,9 @@ def run_oat_experiment(
             dt = float(session.env.cfg.ctrl_dt)
             if not math.isfinite(dt) or dt <= 0:
                 raise ValueError("headless trial requires finite positive ctrl_dt")
+            timing_dt = settings.get("timing_ctrl_dt_s")
+            if timing_dt is not None and not math.isclose(float(timing_dt), dt, rel_tol=1e-9, abs_tol=1e-12):
+                raise ValueError("timing_ctrl_dt_s differs from the checkpoint environment ctrl_dt")
             total = math.ceil(float(settings["duration_s"]) / dt - 1e-9)
             total = max(1, total)
             session.set_autoreset(False)

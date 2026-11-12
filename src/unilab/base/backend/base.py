@@ -127,6 +127,11 @@ class SimBackend(abc.ABC):
             Array with shape ``(nq,)``.
         """
 
+    def get_keyframe_actuator_positions(self, name: str) -> np.ndarray:
+        """Return keyframe positions in action order, without scene prop state."""
+        qpos = self.get_keyframe_qpos(name)
+        return qpos[-self.num_actuators:] if self.num_actuators else qpos[:0]
+
     def get_default_qpos(self) -> np.ndarray:
         """Return the backend/model default qpos through a stable contract."""
         raise NotImplementedError(f"{self.__class__.__name__} does not expose default qpos")
@@ -156,6 +161,18 @@ class SimBackend(abc.ABC):
     def get_body_id(self, name: str) -> int:
         """Resolve one body/link name through the backend contract."""
         return int(self.get_body_ids([name])[0])
+
+    def get_robot_body_ids(self) -> np.ndarray:
+        """Return robot body IDs (including world), excluding task props."""
+        return np.arange(len(self.get_body_names()), dtype=np.int32)
+
+    def get_task_pole_state(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return pole world poses (wxyz) and current robot contact flags.
+
+        Shapes are ``(num_envs, poles, 3)``, ``(num_envs, poles, 4)`` and
+        ``(num_envs, poles)``. Returned buffers may be backend-owned views.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not expose task poles")
 
     def get_geom_id(self, name: str) -> int:
         """Resolve one geom name through the backend contract."""

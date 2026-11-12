@@ -82,6 +82,10 @@ class G1BaseEnv(LocomotionBaseEnv):
     def get_actuator_gains(self) -> tuple[np.ndarray, np.ndarray]:
         return self._backend.get_actuator_gains()
 
+    def get_task_pole_state(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Read physical task-pole poses and robot contacts through the backend contract."""
+        return self._backend.get_task_pole_state()
+
     def get_foot_pos(self) -> np.ndarray:
         """Return left/right foot world positions with shape ``(N, 2, 3)``."""
         left = np.asarray(self._backend.get_sensor_data("left_foot_pos"))

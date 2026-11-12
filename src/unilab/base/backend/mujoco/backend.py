@@ -2,7 +2,7 @@ import os
 import tempfile
 import time
 import weakref
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -231,7 +231,7 @@ class _MuJoCoSceneContext:
     cleanup_handle: Any | None = None
 
 
-def _build_mujoco_scene_context(scene: SceneCfg) -> _MuJoCoSceneContext:
+def _build_mujoco_scene_context(scene: SceneCfg, *, robot_root: str | None = None) -> _MuJoCoSceneContext:
     from unilab.base.backend.mujoco.xml import (
         materialize_mujoco_hfield_attached_scene,
         materialize_scene_fragments,
@@ -242,6 +242,20 @@ def _build_mujoco_scene_context(scene: SceneCfg) -> _MuJoCoSceneContext:
     if not scene.model_file:
         raise ValueError("SceneCfg.model_file must be provided")
 
+    scene.__post_init__()
+    if scene.task_poles:
+        from .task_poles import materialize_task_poles
+
+        model_source, cleanup = materialize_task_poles(
+            scene.model_file, scene.task_poles, robot_root=robot_root
+        )
+        return _MuJoCoSceneContext(
+            model_source=model_source,
+            model_file=scene.model_file,
+            visual_model_file=model_source,
+            artifacts_dir=cleanup.name,
+            cleanup_handle=cleanup,
+        )
     if scene.terrain is None:
         if not scene.fragment_files:
             return _MuJoCoSceneContext(
@@ -316,7 +330,11 @@ class MuJoCoBackend(SimBackend):
                 f"(got num_threads={resolved_num_threads}, num_envs={num_envs})"
             )
 
-        scene_context = _build_mujoco_scene_context(scene)
+        if isinstance(scene, Mapping):
+            scene = SceneCfg(**scene)
+        scene.__post_init__()
+        self._task_pole_names = tuple(pole.name for pole in scene.task_poles)
+        scene_context = _build_mujoco_scene_context(scene, robot_root=base_name)
         self._scene_artifacts = BackendSceneArtifacts(
             model_file=scene_context.model_file,
             visual_model_file=scene_context.visual_model_file,
@@ -331,7 +349,7 @@ class MuJoCoBackend(SimBackend):
         self._model_file = scene_context.model_source
         self._sim_dt = float(sim_dt)
         self._iterations = None if iterations is None else int(iterations)
-        self._post_step_forward_sensor = bool(post_step_forward_sensor)
+        self._post_step_forward_sensor = bool(post_step_forward_sensor or self._task_pole_names)
         self._position_actuator_gains = (
             None if position_actuator_gains is None else dict(position_actuator_gains)
         )
@@ -369,8 +387,13 @@ class MuJoCoBackend(SimBackend):
         self._idx_qpos = 1
         self._idx_qvel = 1 + self.nq
         self._root_qpos_dim, self._root_qvel_dim = _root_state_dims(self._model)
-        self._num_dof_pos = self.nq - self._root_qpos_dim
-        self._num_dof_vel = self.nv - self._root_qvel_dim
+        self._robot_nq = self.nq - 7 * len(self._task_pole_names)
+        self._robot_nv = self.nv - 6 * len(self._task_pole_names)
+        self._num_dof_pos = self._robot_nq - self._root_qpos_dim
+        self._num_dof_vel = self._robot_nv - self._root_qvel_dim
+        robot_nbody = self._model.nbody - len(self._task_pole_names)
+        self._robot_body_ids = np.arange(robot_nbody, dtype=np.int32)
+        self._actuator_qpos_indices = self._model.jnt_qposadr[self._model.actuator_trnid[:, 0]].copy()
 
         # State storage.
         nstate = mujoco.mj_stateSize(self._model, mujoco.mjtState.mjSTATE_FULLPHYSICS)
@@ -381,10 +404,10 @@ class MuJoCoBackend(SimBackend):
 
         # Cached views.
         self._dof_pos_view = self._physics_state[
-            :, self._idx_qpos + self._root_qpos_dim : self._idx_qpos + self.nq
+            :, self._idx_qpos + self._root_qpos_dim : self._idx_qpos + self._robot_nq
         ]
         self._dof_vel_view = self._physics_state[
-            :, self._idx_qvel + self._root_qvel_dim : self._idx_qvel + self.nv
+            :, self._idx_qvel + self._root_qvel_dim : self._idx_qvel + self._robot_nv
         ]
         self._qpos_view = self._physics_state[:, self._idx_qpos : self._idx_qpos + self.nq]
         if self._root_qpos_dim == 7:
@@ -456,6 +479,20 @@ class MuJoCoBackend(SimBackend):
             start = self._sensor_indices["mq_site_vel_0"][0]
             self._reward_site_vel = self._sensor_data[:, start:start + 3 * self._model.nsite].reshape(num_envs, self._model.nsite, 3)
 
+        pole_count = len(self._task_pole_names)
+        if pole_count:
+            def pole_sensor_view(kind: str, width: int) -> np.ndarray:
+                start = self._sensor_indices[f"task_pole_{kind}_0"][0]
+                return self._sensor_data[:, start:start + pole_count * width].reshape(num_envs, pole_count, width)
+
+            self._task_pole_positions = pole_sensor_view("pos", 3)
+            self._task_pole_quats = pole_sensor_view("quat", 4)
+            self._task_pole_contact_values = pole_sensor_view("contact", 1)[..., 0]
+        else:
+            self._task_pole_positions = np.empty((num_envs, 0, 3), dtype=self._np_dtype)
+            self._task_pole_quats = np.empty((num_envs, 0, 4), dtype=self._np_dtype)
+            self._task_pole_contact_values = np.empty((num_envs, 0), dtype=self._np_dtype)
+        self._task_pole_contacts = np.zeros((num_envs, pole_count), dtype=bool)
 
     def get_scene_artifacts(self) -> BackendSceneArtifacts:
         """Return source and materialized MuJoCo scene paths."""
@@ -712,6 +749,16 @@ class MuJoCoBackend(SimBackend):
             raise ValueError(f"Keyframe '{name}' not found in MuJoCo model")
         return np.array(self._model.key_qpos[key_id].copy(), dtype=self._np_dtype)
 
+    def get_keyframe_actuator_positions(self, name: str) -> np.ndarray:
+        return self.get_keyframe_qpos(name)[self._actuator_qpos_indices]
+
+    def get_robot_body_ids(self) -> np.ndarray:
+        return self._robot_body_ids.copy()
+
+    def get_task_pole_state(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        np.greater(self._task_pole_contact_values, 0.0, out=self._task_pole_contacts)
+        return self._task_pole_positions, self._task_pole_quats, self._task_pole_contacts
+
     def get_default_qpos(self) -> np.ndarray:
         return np.asarray(self._model.qpos0, dtype=np.float64).copy()
 
@@ -920,7 +967,7 @@ class MuJoCoBackend(SimBackend):
             raise
 
     def get_dof_armature(self) -> np.ndarray:
-        return np.asarray(self._model.dof_armature, dtype=np.float64).copy()
+        return np.asarray(self._model.dof_armature[:self._robot_nv], dtype=np.float64).copy()
 
     def get_motion_body_ids(self, names: Sequence[str]) -> np.ndarray:
         return self.get_body_ids(names)
@@ -958,8 +1005,9 @@ class MuJoCoBackend(SimBackend):
         return self.get_joint_dof_indices(names) - self._root_qvel_dim
 
     def get_joint_range(self) -> np.ndarray | None:
-        jnt_range = self._model.jnt_range
-        mask = self._model.jnt_type != int(mujoco.mjtJoint.mjJNT_FREE)
+        robot_joint_count = self._model.njnt - len(self._task_pole_names)
+        jnt_range = self._model.jnt_range[:robot_joint_count]
+        mask = self._model.jnt_type[:robot_joint_count] != int(mujoco.mjtJoint.mjJNT_FREE)
         return np.array(jnt_range[mask], dtype=self._np_dtype)
 
     # ------------------------------------------------------------------ #
@@ -1749,8 +1797,13 @@ class MuJoCoBackend(SimBackend):
             )
 
         if randomization.dof_armature is not None:
+            armature = np.asarray(randomization.dof_armature, dtype=np.float64)
+            if self._task_pole_names and armature.shape == (num_reset, self._robot_nv):
+                full_armature = np.broadcast_to(self._model.dof_armature, (num_reset, self.nv)).copy()
+                full_armature[:, :self._robot_nv] = armature
+                armature = full_armature
             translated["dof_armature"] = self._coerce_reset_field(
-                randomization.dof_armature,
+                armature,
                 name="dof_armature",
                 num_reset=num_reset,
                 shaped_tail=(self._model.nv,),

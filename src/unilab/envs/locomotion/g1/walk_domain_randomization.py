@@ -373,6 +373,9 @@ class G1WalkDomainRandomizationProvider(LocomotionDRProvider):
                 dtype=np.dtype(dtype),
             )
         )
+        # Task props remain in full physics/DR state, not in the robot privilege layout.
+        robot_body_ids = env._backend.get_robot_body_ids()
+        plan.info_updates["fada_body_mass_scale"] = plan.info_updates["fada_body_mass_scale"][:, robot_body_ids]
         return plan
 
     def _build_extra_info_updates_for_commands(

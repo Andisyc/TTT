@@ -85,7 +85,9 @@ class LocomotionBaseEnv(NpEnv):
         self._init_qpos = (
             np.asarray(raw_qpos, dtype=dtype) if self._use_global_dtype else np.asarray(raw_qpos)
         )
-        self.default_angles = np.asarray(self._init_qpos[-self._num_action :], dtype=dtype)
+        self.default_angles = np.asarray(
+            self._backend.get_keyframe_actuator_positions(self._keyframe_name), dtype=dtype
+        )
         raw_qvel = self._backend.get_init_qvel()
         self._init_qvel = (
             np.asarray(raw_qvel, dtype=dtype) if self._use_global_dtype else np.asarray(raw_qvel)

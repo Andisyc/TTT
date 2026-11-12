@@ -1,0 +1,41 @@
+# @package _global_
+# Fixed nominal scene; run scripts/record_fada_slalom.py for physical task results.
+defaults:
+  - figure_eight
+  - _self_
+
+demo:
+  figure_eight:
+    enabled: false
+  slalom:
+    enabled: true
+    pole_count: 5
+    spacing_m: 1.0
+    pole_radius_m: 0.075
+    pole_height_m: 0.8
+    pole_mass_kg: 1.0
+    pole_friction: 0.6
+    amplitude_m: 0.5
+    speed_m_s: 0.2
+    first_pole_x_m: 1.5
+    lead_m: 0.5
+    segment_duration_s: 0.8
+    settle_s: 2.0
+    tip_angle_deg: 30.0
+    tip_hold_s: 0.2
+    max_pole_displacement_m: 0.1
+    pass_clearance_m: 0.34
+
+interactive:
+  camera_follow_body: false
+  camera_focus_body_name: pelvis
+  camera_distance: null  # Existing route camera fit covers all five physical poles.
+  camera_elevation: -70.0
+  camera_azimuth: 90.0
+
+env:
+  max_episode_seconds: 120.0
+
+video_recording:
+  output_path: logs/fada_online/v1_g1_slalom_5p_1m.mp4
+  duration_s: null  # Single route followed by the physical settling interval.

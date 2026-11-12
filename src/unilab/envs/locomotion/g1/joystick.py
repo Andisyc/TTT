@@ -301,7 +301,9 @@ class G1WalkEnv(
             self._fada_base_geom_friction = backend.get_geom_friction()
             self._fada_ground_geom_id = backend.get_geom_id("floor")
             self._fada_tau_max = np.max(np.abs(backend.get_actuator_force_range()), axis=1)
-            self._fada_body_names = backend.get_body_names()
+            robot_body_ids = backend.get_robot_body_ids()
+            all_body_names = backend.get_body_names()
+            self._fada_body_names = tuple(all_body_names[int(i)] for i in robot_body_ids)
             actuated_joint_names = backend.get_actuated_joint_names()
             if len(actuated_joint_names) != self._num_action:
                 raise ValueError(

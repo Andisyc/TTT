@@ -270,6 +270,24 @@ demo:
     left_yaw_scale: 1.0
     right_yaw_scale: 1.0
     time_scale: 1.0  # Slow the same geometry by scaling holds up and velocities down.
+  slalom:
+    enabled: false
+    pole_count: 5
+    spacing_m: 1.0
+    pole_radius_m: 0.075
+    pole_height_m: 0.8
+    pole_mass_kg: 1.0
+    pole_friction: 0.6
+    amplitude_m: 0.5
+    speed_m_s: 0.2
+    first_pole_x_m: 1.5
+    lead_m: 0.5
+    segment_duration_s: 0.8
+    settle_s: 2.0
+    tip_angle_deg: 30.0
+    tip_hold_s: 0.2
+    max_pole_displacement_m: 0.1
+    pass_clearance_m: 0.34
   footprints:
     enabled: false
     max_records: 2048  # Per environment; cleared on that environment's reset.

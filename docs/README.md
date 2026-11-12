@@ -61,13 +61,16 @@ Fill a copy of `conf/distill/oat_experiment.yaml` with the shared protocol,
 including the checkpoint, payload condition, optimizer and evaluation settings.
 The batch runner sets `group=full_oat`, the selected online parameter, `seed`,
 and `output_dir`; it enables evaluation and offscreen recording automatically.
-Use separate invocations for unloaded and loaded protocols. For example:
-The [loaded preset](../conf/distill/oat_sensitivity_loaded.yaml) disables base-mass,
-body-mass, and center-of-mass randomization as required by deterministic runtime payloads.
+Use separate invocations for the [unloaded](../conf/distill/oat_sensitivity_unloaded.yaml)
+and [loaded](../conf/distill/oat_sensitivity_loaded.yaml) presets. Both disable
+environment domain randomization, observation noise, external pushes, and random
+reset pose and velocity. They preserve the checkpoint's gait and control settings;
+use the same seeds across conditions. Only the loaded preset adds the runtime payload.
+For example:
 
 ```bash
 uv run --frozen --no-sync python scripts/run_oat_sensitivity.py \
-  --config /path/to/loaded.yaml --output-dir logs/oat_sensitivity/gamma_loaded \
+  --config conf/distill/oat_sensitivity_loaded.yaml --output-dir logs/oat_sensitivity/gamma_loaded \
   --param gamma --values 0.05 0.1 --repeats 10
 ```
 

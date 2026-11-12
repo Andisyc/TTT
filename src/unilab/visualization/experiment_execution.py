@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Mapping
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from unilab.algos.torch.distill.fada.online_controller import FADAOnlineAdaptationConfig
 from unilab.training.seed import apply_training_seed
-from unilab.visualization.experiment_evaluation import evaluate_experiment
+from unilab.visualization.experiment_evaluation import EvaluationWindowUnavailable, evaluate_experiment
 from unilab.visualization.experiment_recording import experiment_recording_run
 from unilab.visualization.playback_distill_sessions import create_fada_playback_session
 from unilab.visualization.playback_sessions import RslRlPlaybackConfig
@@ -188,7 +189,7 @@ def run_oat_experiment(
     result: dict[str, Any] = {"group": settings["group"], "seed": int(cfg.algo.seed),
                               "raw_dir": str(output / "raw"), "evaluation": "not_requested"}
     try:
-        with experiment_recording_run(session):
+        with experiment_recording_run(session), ExitStack() as video_stack:
             dt = float(session.env.cfg.ctrl_dt)
             if not math.isfinite(dt) or dt <= 0:
                 raise ValueError("headless trial requires finite positive ctrl_dt")
@@ -196,6 +197,23 @@ def run_oat_experiment(
             total = max(1, total)
             session.set_autoreset(False)
             session.reset()
+            video = settings.get("video") or {}
+            capture = None
+            if video.get("enabled", False):
+                from unilab.visualization.fada_recording import FADAVideoRecordingConfig, capture_fada_trial
+                from unilab.visualization.playback_cli import _build_play_args
+
+                video_path = output / "trial.mp4"
+                video_config = FADAVideoRecordingConfig(
+                    output_path=str(video_path), duration_s=float(settings["duration_s"]),
+                    fps=video.get("fps", 30), width=video.get("width", 1280), height=video.get("height", 720),
+                )
+                label = f"{video.get('label', settings['group'])} | seed={cfg.algo.seed}"
+                capture = video_stack.enter_context(capture_fada_trial(
+                    session, _build_play_args(cfg, algo="fada"), video_config, label=label,
+                ))
+                capture(0)
+                result["video_path"] = str(video_path)
             command = np.asarray(settings["command"], dtype=np.float32)
             recorder.event("trial_started", group=settings["group"], seed=int(cfg.algo.seed),
                            requested_duration_s=float(settings["duration_s"]), planned_control_steps=total,
@@ -208,14 +226,16 @@ def run_oat_experiment(
             for step in range(1, total + 1):
                 session.set_external_command(command)
                 session.step_once()
+                state = session.env.state
+                terminated = bool(np.any(state.terminated))
+                truncated = bool(np.any(state.truncated))
+                if capture is not None:
+                    capture(step, final=step == total or terminated or truncated)
                 stats = session.last_update_stats
                 if stats is not None:
                     updates += 1
                     log(f"[OAT UPDATE] step={step}/{total} sim_time={step * dt:g}s {stats}")
                     session.last_update_stats = None
-                state = session.env.state
-                terminated = bool(np.any(state.terminated))
-                truncated = bool(np.any(state.truncated))
                 now = time.monotonic()
                 if now - last_report >= float(settings.get("progress_interval_s", 1.0)) or step == total or terminated or truncated:
                     log(f"[OAT] Progress: step={step}/{total} sim_time={step * dt:g}/{total * dt:g}s "
@@ -233,10 +253,17 @@ def run_oat_experiment(
     evaluation: dict[str, Any] = dict(settings.get("evaluation") or {"enabled": False})
     if evaluation.pop("enabled"):
         evaluation.update(run_dir=str(output / "raw"), output_dir=str(output / "evaluation"))
-        summary = evaluate_experiment(evaluation)
-        result.update(evaluation="completed", evaluation_dir=str(output / "evaluation"),
-                      episode_count=len(summary["episodes"]))
-        log(f"[OAT] Evaluation saved: {output / 'evaluation'}")
+        try:
+            summary = evaluate_experiment(evaluation)
+        except EvaluationWindowUnavailable as exc:
+            if not evaluation.get("allow_incomplete_window"):
+                raise
+            result.update(evaluation="unavailable", evaluation_reason=str(exc))
+            log(f"[OAT] Evaluation unavailable: {exc}")
+        else:
+            result.update(evaluation="completed", evaluation_dir=str(output / "evaluation"),
+                          episode_count=len(summary["episodes"]))
+            log(f"[OAT] Evaluation saved: {output / 'evaluation'}")
     else:
         log("[OAT] Collection completed; offline evaluation was not requested.")
     log(f"[OAT] Trial stopped: {result['stop_reason']} steps={result['executed_steps']}/{result['planned_steps']}")

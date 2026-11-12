@@ -25,6 +25,10 @@ from unilab.visualization.experiment_measurement import (
 )
 
 
+class EvaluationWindowUnavailable(ValueError):
+    """The requested window did not occur in this recorded trial."""
+
+
 @dataclass
 class RecordedRun:
     path: Path
@@ -114,8 +118,10 @@ def _window(run: RecordedRun, options: dict[str, Any]) -> tuple[float, float, li
     if origin == "payload":
         events = [e for e in run.events if e["kind"] == "payload_applied"]
         event_index = options.get("payload_event_index")
-        if isinstance(event_index, bool) or not isinstance(event_index, int) or not 0 <= event_index < len(events):
-            raise ValueError("payload-relative evaluation requires a valid explicit payload_event_index")
+        if isinstance(event_index, bool) or not isinstance(event_index, int) or event_index < 0:
+            raise ValueError("payload-relative evaluation requires an explicit nonnegative payload_event_index")
+        if event_index >= len(events):
+            raise EvaluationWindowUnavailable("requested payload event was not recorded")
         offset = float(events[event_index]["sim_time_s"])
     elif origin != "run_start":
         raise ValueError("relative_to must explicitly select run_start or payload")
@@ -126,7 +132,7 @@ def _window(run: RecordedRun, options: dict[str, Any]) -> tuple[float, float, li
                if step.before.sim_time_s >= start - 1e-9 and step.after.sim_time_s <= end + 1e-9
                and (options.get("episode_id") is None or step.before.episode_id == options["episode_id"])]
     if not indices:
-        raise ValueError("requested window contains no complete control transitions")
+        raise EvaluationWindowUnavailable("requested window contains no complete control transitions")
     return start, end, indices
 
 
@@ -249,6 +255,11 @@ def evaluate_experiment(options: dict[str, Any]) -> dict[str, Any]:
     run = read_recorded_run(options["run_dir"])
     summary, rows, indices = _evaluate(run, options)
     reference_path = options.get("reference_run_dir")
+    if reference_path and options.get("allow_incomplete_window") and any(
+        not episode["full_requested_window"] for episode in summary["episodes"]
+    ):
+        summary["normalization"] = {"status": "not_evaluable", "reason": "incomplete requested window"}
+        reference_path = None
     if reference_path:
         reference = read_recorded_run(reference_path)
         reference_summary, _, reference_indices = _evaluate(reference, options)

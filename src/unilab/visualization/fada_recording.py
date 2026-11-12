@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -110,6 +111,49 @@ def _annotate_frame(
             color = (255, 105, 90)
         draw.text((20, 10 + index * line_height), text, fill=color, font=font)
     return np.asarray(frame)
+
+
+@contextmanager
+def capture_fada_trial(session: Any, args: Any, config: FADAVideoRecordingConfig, *, label: str):
+    """Record the trial owner's steps without stepping or resetting the session."""
+    model = _load_viewer_model(session.env, use_env_visual_model=args.use_env_visual_model)
+    model.vis.global_.offwidth = max(model.vis.global_.offwidth, config.width)
+    model.vis.global_.offheight = max(model.vis.global_.offheight, config.height)
+    data = mujoco.MjData(model)
+    camera = mujoco.MjvCamera()
+    rendering = FADAPlaybackRendering(session, model, args)
+    rendering.initialize_camera(camera)
+    font = ImageFont.load_default(size=max(12, config.height // 40))
+    frame_index = 0
+
+    with (
+        mujoco.Renderer(model, height=config.height, width=config.width) as renderer,
+        media.VideoWriter(config.output_path, shape=(config.height, config.width), fps=config.fps) as writer,
+    ):
+        def capture(step: int, *, final: bool = False) -> None:
+            nonlocal frame_index
+            if step:
+                rendering.observe_step()
+            elapsed = step * rendering.ctrl_dt
+            due = math.floor((elapsed + 1e-9) * config.fps) + 1 - frame_index
+            count = max(due, int(final))
+            if count <= 0:
+                return
+            rendering.sync_physics(data)
+            rendering.update_camera(camera, data)
+            renderer.update_scene(data, camera=camera)
+            rendering.append_scene(renderer.scene, data)
+            status = rendering.status(data)
+            image = _annotate_frame(
+                renderer.render(), title=label,
+                details=(f"Simulation time: {elapsed:.2f} s", status.title, *status.details),
+                alert=status.alert, loaded=status.loaded, font=font,
+            )
+            for _ in range(count):
+                writer.add_image(image)
+            frame_index += count
+
+        yield capture
 
 
 def record_fada_playback(

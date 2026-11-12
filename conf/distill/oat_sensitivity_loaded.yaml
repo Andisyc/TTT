@@ -1,0 +1,42 @@
+group: full_oat
+task_owner: g1_walk_flat/mujoco
+checkpoint_path: /ssd1/cyx/TTT/logs/fada/oracle/20261111_102618/student_iter_0031.pt
+output_dir: logs/oat_sensitivity/single_loaded
+seed: 0
+device: cuda
+command: [0.6, 0.0, 0.0]
+duration_s: 30.0
+env_overrides:
+  max_episode_seconds: 31.0
+payload:
+  enabled: true
+  body_name: torso_link
+  added_mass_kg: 6.0
+  attachment_pos_m: [0.004, 0.22, 0.15]
+  half_size_m: [0.08, 0.06, 0.12]
+  attach_time_s: 10.0
+online:
+  window_size: 10
+  warmup_steps: 501
+  update_interval: 10
+  gamma: 0.05
+  sigma: 1.0e-4
+  learning_rate: 1.0e-4
+  max_grad_norm: 1.0
+  lora_rank: 8
+  lora_alpha: 16.0
+  lora_dropout: 0.05
+evaluation:
+  enabled: true
+  linear_frame: body_xy
+  sample_phase: completed
+  relative_to: payload
+  payload_event_index: 0
+  start_s: 0.0
+  end_s: 20.0
+  curve_window_s: 0.2
+  attitude_reference: [0.0, 0.0]
+  attitude_unit: deg
+  attitude_aggregation: rms
+  action_source: policy_action
+  action_joint_reduction: mean

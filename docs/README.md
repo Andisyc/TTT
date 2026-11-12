@@ -35,7 +35,7 @@ define falls or survival. No position/path-success metrics are inferred from the
 ## Headless OAT component trials
 
 `scripts/run_oat_experiment.py` runs one explicitly selected group and seed without
-a viewer or video renderer. Inspect the required protocol fields without launching:
+a viewer. Video rendering is disabled unless `video.enabled=true`. Inspect the required protocol fields without launching:
 
 ```bash
 uv run --frozen --no-sync python scripts/run_oat_experiment.py --cfg job
@@ -54,6 +54,31 @@ The loop stops on its first termination/truncation without autoreset. Duration i
 rounded up to complete control steps and both requested and actual times are recorded.
 Ctrl-C, SIGTERM and errors use the recorder's existing flush/close path.
 No evaluation is silently inferred when collection alone is requested.
+
+## OAT sensitivity batches
+
+Fill a copy of `conf/distill/oat_experiment.yaml` with the shared protocol,
+including the checkpoint, payload condition, optimizer and evaluation settings.
+The batch runner sets `group=full_oat`, the selected online parameter, `seed`,
+and `output_dir`; it enables evaluation and offscreen recording automatically.
+Use separate invocations for unloaded and loaded protocols. For example:
+
+```bash
+uv run --frozen --no-sync python scripts/run_oat_sensitivity.py \
+  --config /path/to/loaded.yaml --output-dir logs/oat_sensitivity/gamma_loaded \
+  --param gamma --values 0.05 0.1 --repeats 10
+```
+
+`--values` accepts one or more explicit values, and `--repeats` defaults to 10.
+Add `--dry-run` to list the planned trial directories. Each trial has a fresh
+session and writes `trial.mp4`, `trial.json`, `raw/`, and `evaluation/` when the
+evaluation window is available. The batch `summary.json` is refreshed after each
+trial and reports the mean, sample standard deviation, minimum, maximum and
+sample count per metric and value. Errors from incomplete windows are kept in
+the trial records but excluded from full-window means. Termination reasons are
+reported separately; they are not interpreted as falls. For normalized errors,
+the optional reference must match the trial seed (use `${seed}` in the reference
+path if needed) and the evaluator's existing compatibility checks.
 
 ## Isolated MuJoCo native lifecycle repair
 

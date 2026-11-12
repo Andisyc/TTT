@@ -31,6 +31,11 @@ official_profile_path: null
 device: null  # Runtime device selection only, not an experimental method setting.
 progress_interval_s: 1.0  # Wall-clock reporting only.
 chunk_steps: 256  # Storage buffering only.
+video:
+  enabled: false  # Opt in to offscreen trial.mp4 in the same rollout.
+  fps: 30
+  width: 1280
+  height: 720
 evaluation:
   enabled: false
   linear_frame: null

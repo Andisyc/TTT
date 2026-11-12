@@ -109,7 +109,7 @@ def test_actual_collision_toppling_and_reset_are_not_visual_only(physical_env):
 
 
 def test_integrated_command_and_measured_gate_success_require_real_motion():
-    config = SlalomConfig()
+    config = SlalomConfig(pole_count=5)
     program = SlalomCommandProgram.from_config(config, ctrl_dt=0.02, prediction_horizon=6)
     evaluator = SlalomEvaluator(config, program.pole_centers)
     pose = np.zeros(3)

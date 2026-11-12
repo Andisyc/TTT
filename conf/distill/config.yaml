@@ -272,11 +272,11 @@ demo:
     time_scale: 1.0  # Slow the same geometry by scaling holds up and velocities down.
   slalom:
     enabled: false
-    pole_count: 5
+    pole_count: 3
     spacing_m: 1.0
-    pole_radius_m: 0.075
+    pole_radius_m: 0.02
     pole_height_m: 0.8
-    pole_mass_kg: 1.0
+    pole_mass_kg: 0.2
     pole_friction: 0.6
     amplitude_m: 0.5
     speed_m_s: 0.2

@@ -123,7 +123,7 @@ def run_slalom_demo(cfg: Any, root_dir: str | Path, *, log=print) -> dict[str, A
         from dataclasses import replace
         capture_context = capture_fada_trial(
             session, args, replace(recording, output_path=str(output)),
-            label="G1 five-pole slalom", render_config=render_config,
+            label=f"G1 {config.pole_count}-pole slalom", render_config=render_config,
         ) if recording.enabled else nullcontext(None)
         with capture_context as capture:
             data = run_slalom_trial(session, config, capture=capture, log=log, reset=False)

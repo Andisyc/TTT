@@ -14,11 +14,11 @@ from scipy.optimize import brentq
 @dataclass(frozen=True)
 class SlalomConfig:
     enabled: bool = False
-    pole_count: int = 5
+    pole_count: int = 3
     spacing_m: float = 1.0
-    pole_radius_m: float = 0.075
+    pole_radius_m: float = 0.02
     pole_height_m: float = 0.8
-    pole_mass_kg: float = 1.0
+    pole_mass_kg: float = 0.2
     pole_friction: float = 0.6
     amplitude_m: float = 0.5
     speed_m_s: float = 0.2
@@ -34,8 +34,8 @@ class SlalomConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("slalom.enabled must be boolean")
-        if isinstance(self.pole_count, bool) or not isinstance(self.pole_count, Integral) or self.pole_count not in (4, 5):
-            raise ValueError("slalom.pole_count must be 4 or 5")
+        if isinstance(self.pole_count, bool) or not isinstance(self.pole_count, Integral) or self.pole_count not in (3, 4, 5):
+            raise ValueError("slalom.pole_count must be 3, 4 or 5")
         for name in (
             "spacing_m", "pole_radius_m", "pole_height_m", "pole_mass_kg",
             "amplitude_m", "speed_m_s", "first_pole_x_m", "lead_m",

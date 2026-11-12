@@ -9,11 +9,11 @@ demo:
     enabled: false
   slalom:
     enabled: true
-    pole_count: 5
+    pole_count: 3
     spacing_m: 1.0
-    pole_radius_m: 0.075
+    pole_radius_m: 0.02  # 4 cm outer diameter; configurable plastic-pipe placeholder.
     pole_height_m: 0.8
-    pole_mass_kg: 1.0
+    pole_mass_kg: 0.2  # Placeholder, not a measured property of the real pipe.
     pole_friction: 0.6
     amplitude_m: 0.5
     speed_m_s: 0.2
@@ -29,7 +29,7 @@ demo:
 interactive:
   camera_follow_body: false
   camera_focus_body_name: pelvis
-  camera_distance: null  # Existing route camera fit covers all five physical poles.
+  camera_distance: null  # Existing route camera fit covers the configured pole count.
   camera_elevation: -70.0
   camera_azimuth: 90.0
 
@@ -37,5 +37,5 @@ env:
   max_episode_seconds: 120.0
 
 video_recording:
-  output_path: logs/fada_online/v1_g1_slalom_5p_1m.mp4
+  output_path: logs/fada_online/v3_g1_slalom_3p_thin.mp4
   duration_s: null  # Single route followed by the physical settling interval.

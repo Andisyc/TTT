@@ -1,4 +1,4 @@
-"""Record one frozen-policy five-pole slalom with physical success/failure evidence."""
+"""Record one frozen-policy pole slalom with physical success/failure evidence."""
 from __future__ import annotations
 
 import os

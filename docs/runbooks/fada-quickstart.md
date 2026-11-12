@@ -131,34 +131,97 @@ uv run --frozen --no-sync python scripts/train_distill.py \
   training.fada.async_artifact_dir="$PWD/logs/fada/oracle/v1_train/source_batches"
 ```
 
-## 五柱 S 形绕行：名义场景与单趟录制
+## S 形绕柱：三根细管与五柱历史版本
 
-`recording_profile=pole_slalom` 使用 5 根真实可碰撞、可倾倒的自由柱体，中心距 1 米，
-直径 15 厘米、高 80 厘米、质量 1 千克、摩擦系数 0.6。柱心在起步坐标系中依次为
-`(1.5, 0.5)` 至 `(5.5, 0.5)`；机器人从 `(0, 0)` 朝 +X 起步，左右交替穿绕。
-参考线横向范围为 0–1 米，终点约 `(7, 0)`。四柱版本用 `demo.slalom.pole_count=4`。
-这些道具参数是仿真初值，不代表已与真机现场柱子标定。
+`recording_profile=pole_slalom` 现在默认使用 **3 根细管**，中心距仍为 1 米。
+管外径先按 4 厘米、高 80 厘米、质量 0.2 千克、摩擦系数 0.6 建模；外径和质量都是
+可调的仿真占位值，不是用户实物的测量值。相邻管面净空为 96 厘米，柱心位于
+`(1.5, 0.5)`、`(2.5, 0.5)`、`(3.5, 0.5)`；机器人从 `(0, 0)` 朝 +X 起步。
+柱列长度由 4 米缩短为 **2 米**，基座参考路线纵向由 7 米缩短为 **5 米**，横向仍为
+0–1 米。建议按约 **8×4 米**净空区初选场地，包含身体和粗略外围余量，不是真机安全认证。
+三柱的实际走过范围尚需实测，不能直接用这些参考尺寸替代。
 
-指令由 `src/unilab/visualization/slalom.py` 的圆缓 S 形程序生成，名义前进速度
-0.2 m/s，控制周期 0.02 秒、每段保持 0.8 秒。当前五柱离散路线行走约 52.8 秒，
-随后停止给行走指令，并留 2 秒检查柱子与任务状态；不会在终点循环回起点。
-指令只依赖配置和控制步，不使用位姿反馈，不修改策略，也不影响 Gerono v14。
+名义指令由 `src/unilab/visualization/slalom.py` 的圆缓 S 形程序生成，名义前进速度
+0.2 m/s，控制周期 0.02 秒、每段保持 0.8 秒。三柱名义路线行走约 36.8 秒；
+下面复用已调优前缀的候选表为 54.4 秒，再观察 2 秒；五柱原始几何表为 52.8 秒。
 
-**必须用专用入口取得任务结果。** 普通 `play_fada_online.py` 可以播放该场景，但
-不负责输出逐柱通过／倾倒判定。下面的输出必须使用新的版本号；已有 MP4、NPZ 或 JSON
-不会被专用入口覆盖，shell 重定向的 `.log` 则需要由操作者避免复用同名文件。
+### 五柱历史成功版本（保留，不覆盖）
+
+已跑通的五柱 v2 使用单独保存的固定指令表，不是原始几何表。其原柱径为15厘米、质量为1千克。
+调整包括起步直行多保持
+1.6 秒、针对实际左右转向响应调整持转和回正时机、复用有效的两柱穿绕单元，以及
+离开第四根后才补第五根的左弯。没有调高前进速度、没有使用在线位姿反馈、没有训练策略。
+新表共 100 段、每段 0.8 秒，行走 80 秒后给零速度指令，再观察 2 秒。
+
+| 成功版本的服务器文件 | 路径 |
+|---|---|
+| 最终指令表与复跑轨迹 | `/ssd1/cyx/TTT/logs/fada_online/v2_g1_slalom_timing/v2_best_5p_1m.npz` |
+| 成功录像 | `/ssd1/cyx/TTT/logs/fada_online/v2_g1_slalom_timing/v2_best_5p_1m.mp4` |
+| 任务结果 | `/ssd1/cyx/TTT/logs/fada_online/v2_g1_slalom_timing/v2_best_5p_1m.json` |
+| 录制日志 | `/ssd1/cyx/TTT/logs/fada_online/v2_g1_slalom_timing/v2_best_5p_1m.log` |
+
+同一 checkpoint、相同随机种子 1 下，无视频试跑和录制复跑均为 `success=true`、
+`passed_poles=5`，全部柱子未倾倒、未超过 0.1 米位移。第二根有 1 次接触采样，
+因此是“不碰倒且不明显推移”，不是零接触。五根通过时基座至柱心的横向距离依次约为
+36.5、54.1、35.6、55.7、54.9 厘米；这不是机器人外壳到柱面的距离。
+该结果仅验证当前固定场景和种子，未证明换种子、柱径、柱距或真机后仍可复现。
+
+### 三柱细管候选的启动方式
+
+服务器候选表为 `/ssd1/cyx/TTT/logs/fada_online/v3_g1_slalom_3p_thin/input_commands.npz`。
+它复用五柱成功表里通过前三根的有效前缀，并重新连接出场弯和直行，不是播到第三根就截断。
+候选共 68 段、行走 54.4 秒，已保存但**尚未验证三根细管场景的实际策略结果**。
+改为细管后也不能把五柱成功或其接触统计直接当作三柱结果。
+
+先更新服务器代码以支持 `pole_count=3`，再显式加载候选表。直接运行普通入口只会生成
+未调优的名义表；仅修改文件名也不会切换指令。下述进程内加载方式不改仓库源代码。
 
 ```bash
 cd /ssd1/cyx/TTT
 mkdir -p logs/fada_online
-OUTPUT="$PWD/logs/fada_online/v1_g1_slalom_5p_1m"
+OUTPUT="$PWD/logs/fada_online/v3_g1_slalom_3p_thin"
+export SLALOM_COMMAND_TABLE="$PWD/logs/fada_online/v3_g1_slalom_3p_thin/input_commands.npz"
 
 nohup env \
   LD_PRELOAD=/lib/x86_64-linux-gnu/libgcc_s.so.1 \
   MUJOCO_GL=egl \
   PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH="$PWD/src" \
   OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
-  uv run --frozen --no-sync python scripts/record_fada_slalom.py \
+  uv run --frozen --no-sync python -c '
+import runpy
+import os
+import numpy as np
+import torch
+from unilab.visualization.slalom import SlalomCommandProgram
+
+np.random.seed(1)
+torch.manual_seed(1)
+torch.set_num_threads(1)
+original = SlalomCommandProgram.from_config.__func__
+
+def replay(cls, *args, **kwargs):
+    program = original(cls, *args, **kwargs)
+    path = os.environ["SLALOM_COMMAND_TABLE"]
+    with np.load(path, allow_pickle=False) as data:
+        if (
+            program.segment_steps != int(data["segment_steps"])
+            or not np.isclose(program.ctrl_dt, float(data["ctrl_dt"]))
+            or not np.allclose(program.pole_centers, data["pole_centers"])
+            or not np.allclose(program.reference_points, data["reference_points"])
+        ):
+            raise ValueError("Current course does not match the saved command table")
+        table = data["commands"].copy()
+        if table.ndim != 2 or table.shape[1] != 3 or not np.isfinite(table).all():
+            raise ValueError("Invalid command table")
+        program.commands = table
+        program.commands.setflags(write=False)
+        program.total_control_steps = len(table) * program.segment_steps
+        program.duration_s = program.total_control_steps * program.ctrl_dt
+    return program
+
+SlalomCommandProgram.from_config = classmethod(replay)
+runpy.run_path("scripts/record_fada_slalom.py", run_name="__main__")
+' \
   task=g1_walk_flat/mujoco \
   recording_profile=pole_slalom \
   training.device=cuda \
@@ -169,8 +232,12 @@ nohup env \
 printf 'PID：%s\n日志：%s.log\n视频：%s.mp4\n' "$!" "$OUTPUT" "$OUTPUT" >&2
 ```
 
+历史五柱复现：将 `SLALOM_COMMAND_TABLE` 改为上表的五柱 v2 NPZ、`OUTPUT` 换一个新版本号，
+并在命令中显式添加 `demo.slalom.pole_count=5 demo.slalom.pole_radius_m=0.075 demo.slalom.pole_mass_kg=1.0`，
+以免新版三柱默认值改变旧场景。4、5 柱能力仍保留，Gerono v14 未改动。
+
 预期输出为同名前缀的 `.mp4` 视频、`.npz` 实际轨迹／指令／柱子姿态及 `.json` 任务报告。
-报告的 `success=true` 才表示实际按顺序从五柱交替两侧通过、到达终点且稳定观察期结束；
+报告的 `success=true` 才表示实际按顺序从配置指定的全部柱子交替两侧通过、到达终点且稳定观察期结束；
 指令播放完毕、视频写完或没摔倒都不单独算成功。
 
 柱子倾斜超过 30° 持续 0.2 秒、水平移动超过 0.1 米、错误一侧通过、遗漏柱子或机器人终止，
@@ -181,9 +248,9 @@ printf 'PID：%s\n日志：%s.log\n视频：%s.mp4\n' "$!" "$OUTPUT" "$OUTPUT" >
 道具场景在私有临时目录生成，机器人原始 XML 指纹和 checkpoint 校验保留，正常关闭会清理。
 当前只支持 MuJoCo 平地名义场景，不叠加 terrain、scene fragments、负重或在线适应。
 
-本地已通过真实 G1 的柱体碰撞／倾倒／reset、机器人契约兼容和实际回放工厂接入检查，
-并渲染确认五柱与参考路线可见。**指定 checkpoint 只在服务器，尚未实测策略能否穿绕一趟。**
-先由用户更新服务器代码，再运行以上一次单趟录制；不要把几何可行或本地检查当作策略已成功。
+本地检查已验证真实柱体碰撞／倾倒／reset、机器人契约兼容和回放工厂接入；
+服务器曾完成五柱 v2 实测及复跑。当前三柱细管版本只完成代码与候选表准备，
+尚未实测穿绕成功或零接触，不把五柱轨迹冒充为三柱实际占地。
 
 ## 操作偏好与边界
 

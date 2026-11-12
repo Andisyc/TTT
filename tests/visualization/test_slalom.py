@@ -25,7 +25,7 @@ def _integrate_twist(pose, command, dt):
     pose[2] += angle
 
 
-@pytest.mark.parametrize("pole_count", [4, 5])
+@pytest.mark.parametrize("pole_count", [3, 4, 5])
 @pytest.mark.parametrize("ctrl_dt", [0.02, 0.03])
 def test_independently_integrated_commands_follow_alternating_route(pole_count, ctrl_dt):
     config = SlalomConfig(pole_count=pole_count)
@@ -50,9 +50,9 @@ def test_independently_integrated_commands_follow_alternating_route(pole_count, 
             np.testing.assert_allclose(pose[:2], program.reference_points[index], atol=2e-10)
     assert len(crossings) == pole_count
     np.testing.assert_allclose(crossings, [1.0 if i % 2 == 0 else 0.0 for i in range(pole_count)], atol=0.003)
-    expected_y = 0.0 if pole_count == 5 else 1.0
+    expected_y = 0.0 if pole_count % 2 else 1.0
     np.testing.assert_allclose(pose, [program.finish_x_m, expected_y, 0.0], atol=2e-10)
-    assert program.finish_x_m == pytest.approx(7.0 if pole_count == 5 else 6.0)
+    assert program.finish_x_m == pytest.approx(2.0 + pole_count)
     assert program.duration_s == pytest.approx(program.total_control_steps * ctrl_dt)
     assert program.segment_steps >= 6
     assert np.all(program.commands[:, 0] > 0.0)
@@ -83,7 +83,7 @@ def test_program_finishes_once_and_never_restarts_or_exposes_mutable_table():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("pole_count", 3), ("pole_count", True), ("enabled", 1),
+    ("pole_count", 2), ("pole_count", True), ("enabled", 1),
     ("spacing_m", 0.0), ("speed_m_s", np.nan), ("pole_mass_kg", -1.0),
     ("pole_friction", -0.1), ("settle_s", -1.0), ("tip_angle_deg", 90.0),
     ("tip_hold_s", 0.0), ("first_pole_x_m", 0.5), ("pass_clearance_m", 0.5),
@@ -126,7 +126,7 @@ def test_environment_validation_reuses_command_owner_and_validates_final_stop():
 
 
 def _trial(config=None):
-    config = SlalomConfig() if config is None else config
+    config = SlalomConfig(pole_count=5) if config is None else config
     centers = np.column_stack((config.first_pole_x_m + np.arange(config.pole_count) * config.spacing_m,
                                np.full(config.pole_count, config.amplitude_m)))
     evaluator = SlalomEvaluator(config, centers)
@@ -149,7 +149,7 @@ def _pass_all_gates(trial):
         _sample(trial, (center[0], 2.0 * config.amplitude_m if index % 2 == 0 else 0.0))
 
 
-@pytest.mark.parametrize("pole_count", [4, 5])
+@pytest.mark.parametrize("pole_count", [3, 4, 5])
 def test_measured_gates_finish_and_full_settle_required_for_success(pole_count):
     trial = _trial(SlalomConfig(pole_count=pole_count))
     _pass_all_gates(trial)

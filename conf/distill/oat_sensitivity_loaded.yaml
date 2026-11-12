@@ -8,6 +8,10 @@ command: [0.6, 0.0, 0.0]
 duration_s: 30.0
 env_overrides:
   max_episode_seconds: 31.0
+  domain_rand:
+    randomize_base_mass: false
+    randomize_body_mass: false
+    random_com: false
 payload:
   enabled: true
   body_name: torso_link

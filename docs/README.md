@@ -62,6 +62,8 @@ including the checkpoint, payload condition, optimizer and evaluation settings.
 The batch runner sets `group=full_oat`, the selected online parameter, `seed`,
 and `output_dir`; it enables evaluation and offscreen recording automatically.
 Use separate invocations for unloaded and loaded protocols. For example:
+The [loaded preset](../conf/distill/oat_sensitivity_loaded.yaml) disables base-mass,
+body-mass, and center-of-mass randomization as required by deterministic runtime payloads.
 
 ```bash
 uv run --frozen --no-sync python scripts/run_oat_sensitivity.py \

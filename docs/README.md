@@ -134,6 +134,11 @@ abandoned worker logs are rejected rather than overwritten or automatically
 retried. Use a new batch directory if a failed attempt left partial artifacts.
 `--methods`, `--payloads-kg`, `--repeats` and `--first-seed` can select a smaller
 new batch, including the exact missing method/mass/seed combination.
+Use `--update-interval 5` to set both the update interval and the sample window
+to five control steps. Use `--duration-s 120` to set the total simulation and
+video duration, extend the episode timeout if needed, and evaluate through the
+last planned control step after attachment. Neither flag changes attachment or
+warm-up timing. Without these flags, the corresponding YAML settings apply.
 
 Results live at `<output>/<method>/payload=<kg>/seed_<seed>/` with a video,
 `trial.json`, raw measurements and evaluation. Per-trial logs are in `logs/`;

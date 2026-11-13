@@ -16,6 +16,8 @@ def main() -> None:
     parser.add_argument("--first-seed", type=int)
     parser.add_argument("--methods", nargs="+", choices=("fada_ttt", "online_reference", "self_supervised_correction", "full_oat"))
     parser.add_argument("--payloads-kg", nargs="+", type=float)
+    parser.add_argument("--update-interval", type=int, help="T in control steps; also sets the update batch size")
+    parser.add_argument("--duration-s", type=float, help="Total simulation and video duration in seconds")
     parser.add_argument("--reference-run-dir", help="Explicit common reference template; supports {payload_kg} and {seed}")
     parser.add_argument("--resume", action="store_true", help="Skip verified completed trials from the identical batch plan")
     parser.add_argument("--dry-run", action="store_true", help="Print the plan without creating files or launching workers")
@@ -35,12 +37,20 @@ def main() -> None:
     if args.reference_run_dir is not None:
         config.protocol.evaluation.reference_run_dir = args.reference_run_dir
     output = args.output_dir.expanduser().resolve()
-    trials = plan_ablation_trials(config, output_dir=output)
+    trials = plan_ablation_trials(
+        config, output_dir=output, update_interval=args.update_interval, duration_s=args.duration_s,
+    )
     if args.dry_run:
         for method in config.methods:
             for mass in config.payloads_kg:
                 print(f"{method} payload={mass:g}kg seeds={config.first_seed}.."
                       f"{config.first_seed + config.repeats - 1}")
+        trial = trials[0]
+        print(f"Checkpoint: {trial['checkpoint_path']}")
+        print(f"T={trial['online']['update_interval']} window_size={trial['online']['window_size']} "
+              f"duration={trial['duration_s']:g}s attach={trial['payload']['attach_time_s']:g}s "
+              f"episode_limit={trial['env_overrides'].get('max_episode_seconds')} "
+              f"evaluation={trial['evaluation']['start_s']:g}..{trial['evaluation']['end_s']:g}s after attachment")
         print(f"Planned trials: {len(trials)}; each trial uses a fresh process")
         print(f"Output: {output}")
         return

@@ -19,7 +19,10 @@ from unilab.visualization.experiment_common import GROUP_MODES, _read_trial_metr
 METHODS = ("fada_ttt", "online_reference", "self_supervised_correction", "full_oat")
 
 
-def plan_ablation_trials(config: DictConfig, *, output_dir: Path) -> list[dict[str, Any]]:
+def plan_ablation_trials(
+    config: DictConfig, *, output_dir: Path, update_interval: int | None = None,
+    duration_s: float | None = None,
+) -> list[dict[str, Any]]:
     """Materialize explicit method/mass/seed identities without creating files."""
     methods = list(config.methods)
     masses = [float(value) for value in config.payloads_kg]
@@ -46,10 +49,25 @@ def plan_ablation_trials(config: DictConfig, *, output_dir: Path) -> list[dict[s
     dt = float(protocol["timing_ctrl_dt_s"])
     if not math.isfinite(dt) or dt <= 0:
         raise ValueError("timing_ctrl_dt_s must be finite and positive")
-    duration, attach = float(protocol["duration_s"]), float(payload["attach_time_s"])
+    duration = float(protocol["duration_s"] if duration_s is None else duration_s)
+    attach = float(payload["attach_time_s"])
+    if not all(math.isfinite(x) for x in (duration, attach)) or not 0 <= attach < duration:
+        raise ValueError("recording duration must be finite and extend beyond payload attachment")
+    horizon = math.ceil(duration / dt - 1e-9) * dt
+    if duration_s is not None:
+        protocol["duration_s"] = duration
+        evaluation["end_s"] = horizon - math.ceil(attach / dt) * dt
+        env_overrides = protocol["env_overrides"]
+        env_overrides["max_episode_seconds"] = max(
+            float(env_overrides.get("max_episode_seconds") or 0.0), horizon + dt,
+        )
     start, end = float(evaluation["start_s"]), float(evaluation["end_s"])
-    if not all(math.isfinite(x) for x in (duration, attach, start, end)) or not (0 <= attach < duration and 0 <= start < end <= duration - attach + 1e-9):
+    if not 0 <= start < end <= horizon - math.ceil(attach / dt) * dt + 1e-9:
         raise ValueError("evaluation must fit entirely after attachment and within the run")
+    if update_interval is not None:
+        if type(update_interval) is not int or update_interval < 1:
+            raise ValueError("--update-interval must be a positive integer")
+        protocol["online"].update(update_interval=update_interval, window_size=update_interval)
     if int(protocol["online"]["warmup_steps"]) <= math.ceil(attach / dt):
         raise ValueError("warmup_steps must prevent online updates before attachment")
     trials = []

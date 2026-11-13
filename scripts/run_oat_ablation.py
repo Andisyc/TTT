@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -17,6 +18,7 @@ def main() -> None:
     parser.add_argument("--methods", nargs="+", choices=("fada_ttt", "online_reference", "self_supervised_correction", "full_oat"))
     parser.add_argument("--payloads-kg", nargs="+", type=float)
     parser.add_argument("--update-interval", type=int, help="T in control steps; also sets the update batch size")
+    parser.add_argument("--gamma", type=float, help="Override the nonnegative OAT correction gain")
     parser.add_argument("--duration-s", type=float, help="Total simulation and video duration in seconds")
     parser.add_argument("--export-adapted-after-payload-s", type=float,
                         help="Run this many seconds under load and save a frozen inference checkpoint")
@@ -39,9 +41,11 @@ def main() -> None:
             config[field] = value
     if args.reference_run_dir is not None:
         config.protocol.evaluation.reference_run_dir = args.reference_run_dir
+    if args.gamma is not None:
+        if not math.isfinite(args.gamma) or args.gamma < 0:
+            parser.error("--gamma must be finite and nonnegative")
+        config.protocol.online.gamma = args.gamma
     if args.forward_m_s is not None:
-        import math
-
         if not math.isfinite(args.forward_m_s) or args.forward_m_s <= 0:
             parser.error("--forward-m-s must be finite and positive")
         config.protocol.command = [args.forward_m_s, 0.0, 0.0]
@@ -58,6 +62,7 @@ def main() -> None:
         trial = trials[0]
         print(f"Checkpoint: {trial['checkpoint_path']}")
         print(f"T={trial['online']['update_interval']} window_size={trial['online']['window_size']} "
+              f"gamma={trial['online']['gamma']:g} "
               f"duration={trial['duration_s']:g}s attach={trial['payload']['attach_time_s']:g}s "
               f"episode_limit={trial['env_overrides'].get('max_episode_seconds')} "
               f"evaluation={trial['evaluation']['start_s']:g}..{trial['evaluation']['end_s']:g}s after attachment")

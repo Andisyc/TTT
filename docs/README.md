@@ -141,6 +141,8 @@ to five control steps. Use `--duration-s 120` to set the total simulation and
 video duration, extend the episode timeout if needed, and evaluate through the
 last planned control step after attachment. Neither flag changes attachment or
 warm-up timing. Without these flags, the corresponding YAML settings apply.
+Use `--gamma` to override the OAT correction gain; otherwise the YAML value
+applies. FADA-TTT does not use this gain.
 
 For fixed-budget adaptation before route evaluation, replace `--duration-s` with
 `--export-adapted-after-payload-s 30` and set `--forward-m-s 0.33` (Figure-Eight)

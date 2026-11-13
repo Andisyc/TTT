@@ -93,15 +93,17 @@ with TemporaryDirectory(prefix='table2_g1_scene_') as tmp:
     with initialize_config_dir(config_dir=str(root / 'conf/distill'), version_base='1.3'):
         cfg = compose(config_name='config', overrides=[
             'task=g1_walk_flat/mujoco', 'recording_profile=figure_eight', 'algo.seed=0',
-            'training.device=cuda', f'training.play_checkpoint_path={checkpoint}',
-            f'++training.fada.scene_model_file={scene}', 'online_adaptation.enabled=false',
+            'training.device=cuda', 'online_adaptation.enabled=false',
             'env.runtime_payload.enabled=true', 'env.runtime_payload.body_name=torso_link',
             'env.runtime_payload.added_mass_kg=8.0', 'env.runtime_payload.attach_time_s=0.0',
             'env.runtime_payload.attachment_pos_m=[0.004,0.22,0.15]',
             'env.runtime_payload.half_size_m=[0.08,0.06,0.12]',
-            'experiment_recording.enabled=true', f'experiment_recording.output_dir={out}/raw',
-            f'video_recording.output_path={out}/trial.mp4', f'video_recording.duration_s={duration_s}',
+            'experiment_recording.enabled=true', f'video_recording.duration_s={duration_s}',
         ])
+    cfg.training.play_checkpoint_path = str(checkpoint)
+    OmegaConf.update(cfg, 'training.fada.scene_model_file', str(scene), force_add=True)
+    cfg.experiment_recording.output_dir = str(out / 'raw')
+    cfg.video_recording.output_path = str(out / 'trial.mp4')
     args = _build_play_args(cfg, algo='fada')
     session, _, _ = create_fada_playback_session(
         playback_cfg=_build_playback_config(args, num_envs=1), cfg=cfg, root_dir=root, device='cuda',

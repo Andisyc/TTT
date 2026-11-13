@@ -170,6 +170,34 @@ Passing these checks verifies the repaired boundary, not elimination of an
 intermittent training crash. The sibling standalone `mujoco-uni-runtime` package
 is not substituted for the locked production package.
 
+### Initialization Heisenbug capture
+
+`scripts/diagnose_oat_initialization.sh` is an opt-in Linux diagnostic, not a
+batch runner or repair. It reads an existing failed request, preserves the
+checkpoint/method/seed, and redirects all new artifacts into capture storage.
+It compares recording imports without a session against the production session
+construction/reset chain followed by recording imports. No control step or
+optimizer update is executed. A second observer uses existing GDB plus
+`PYTHONMALLOC=debug`; no dependency is installed or replaced.
+
+```bash
+bash scripts/diagnose_oat_initialization.sh \
+  --trial logs/oat_ablation/table3_fada_ttt_6_8_v2/requests/fada_ttt_kg6_seed4.json \
+  --capture-root /ssd1/cyx/TTT/logs/heisenbug_capture
+```
+
+Run with the same `LD_PRELOAD` and `MUJOCO_GL` as the failing trial. The budget
+is at most four fresh processes of 60 seconds each. After a failure, only the
+matching observer comparison is attempted; no automatic experiment retry occurs.
+Identity metadata, exception records, GDB stacks and exit/timeout state are
+packed into `RETURN_ME.tar.gz` under a new timestamped capture directory.
+Python exceptions deliberately trigger an abort only under the debugger to
+capture state; that marker is not itself evidence of a native allocator fault.
+All passes mean the bounded campaign did not reproduce the failure, not that
+the intermittent bug has been eliminated. Existing experiment outputs remain
+untouched; capture output must not be counted as experiment data.
+
+
 ## Process material
 
 `superpowers/` contains dated implementation plans and design working records produced by the

@@ -10,7 +10,7 @@ from typing import Any
 GROUP_MODES = {
     "fada_ttt": "fada_ttt",
     "online_reference": "trajectory_lora",
-    "action_snapshot": "action_base",
+    "self_supervised_correction": "self_supervised_correction",
     "no_anchor": "trajectory_base",
     "full_oat": "trajectory_base",
 }

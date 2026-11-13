@@ -182,7 +182,7 @@ def _read(path):
     return json.loads((path / "run_config.json").read_text()), blocks, events
 
 
-@pytest.mark.parametrize("mode", ["trajectory_base", "action_base", "trajectory_lora", "fada_ttt"])
+@pytest.mark.parametrize("mode", ["trajectory_base", "self_supervised_correction", "trajectory_lora", "fada_ttt"])
 def test_recorder_real_updates_prereset_truth_and_payload_timestamp(make_session, mode):
     session, path = make_session(mode=mode)
     before = [value.detach().clone() for value in fada_adapter_parameters(session.controller.policy)]

@@ -16,7 +16,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from unilab.visualization.experiment_common import GROUP_MODES, _read_trial_metrics, _summarize, _write_json
 
-METHODS = ("fada_ttt", "online_reference", "action_snapshot", "full_oat")
+METHODS = ("fada_ttt", "online_reference", "self_supervised_correction", "full_oat")
 
 
 def plan_ablation_trials(config: DictConfig, *, output_dir: Path) -> list[dict[str, Any]]:

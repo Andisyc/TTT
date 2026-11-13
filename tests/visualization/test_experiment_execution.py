@@ -205,7 +205,7 @@ def _read(output):
 
 @pytest.mark.parametrize(("group", "mode", "anchored"), [
     ("fada_ttt", "fada_ttt", False), ("online_reference", "trajectory_lora", True),
-    ("action_snapshot", "action_base", True), ("no_anchor", "trajectory_base", False),
+    ("self_supervised_correction", "self_supervised_correction", True), ("no_anchor", "trajectory_base", False),
     ("full_oat", "trajectory_base", True),
 ])
 def test_five_real_updates_record_and_evaluate(trial, group, mode, anchored):

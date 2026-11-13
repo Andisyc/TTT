@@ -1,6 +1,6 @@
 # One explicitly selected straight-line trial. No inherited Demo protocol.
 # ??? means the caller must supply a value; these are not formal defaults.
-group: ???  # fada_ttt | online_reference | action_snapshot | no_anchor | full_oat
+group: ???  # fada_ttt | online_reference | self_supervised_correction | no_anchor | full_oat
 task_owner: ???  # Task/backend owner, e.g. g1_walk_flat/mujoco; no backend-only override.
 checkpoint_path: ???
 output_dir: ???  # New trial directory; raw/ and optional evaluation/ are created below it.

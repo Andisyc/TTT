@@ -77,16 +77,16 @@ def build_expert_samples(
     *,
     gamma: float,
     runtime_spec: FADARuntimeSpec | None = None,
-    mode: Literal["trajectory_base", "action_base", "trajectory_lora"] = "trajectory_base",
+    mode: Literal["trajectory_base", "self_supervised_correction", "trajectory_lora"] = "trajectory_base",
 ) -> tuple[FADAOnlineSample, ...]:
     """Build fixed first-action targets without mutating the reference Tracker.
 
     trajectory_*: a_t + gamma * (T(S_predict) - T(S_real)).
-    action_base: a_t + gamma * (a_t - T(S_real)).
+    self_supervised_correction: a_t + gamma * (T(S_real) - a_t).
     Base modes require frozen parameters; trajectory_lora accepts trainable
     parameters under no_grad. Every reference must already be in eval mode.
     """
-    if mode not in ("trajectory_base", "action_base", "trajectory_lora"):
+    if mode not in ("trajectory_base", "self_supervised_correction", "trajectory_lora"):
         raise ValueError(f"unsupported online target mode: {mode!r}")
     if not trajectories:
         raise ValueError("expert labels require a non-empty trajectory window")
@@ -115,16 +115,17 @@ def build_expert_samples(
     reference_realized = invoke_fada_idm(
         reference_idm, spec, observations, actions, commands, realized, history_valid_mask=masks
     )[:, 0]
-    if mode == "action_base":
-        reference_nominal = executed
+    if mode == "self_supervised_correction":
+        reference_prediction, reference_target = reference_realized, executed
     else:
         nominal = torch.cat([snapshot.nominal_future for snapshot in snapshots]).to(reference)
-        reference_nominal = invoke_fada_idm(
+        reference_prediction = invoke_fada_idm(
             reference_idm, spec, observations, actions, commands, nominal, history_valid_mask=masks
         )[:, 0]
-    if reference_nominal.shape != executed.shape or reference_realized.shape != executed.shape:
+        reference_target = reference_realized
+    if reference_prediction.shape != executed.shape or reference_target.shape != executed.shape:
         raise ValueError("expert predictions must match first-action snapshots")
-    targets = executed + gamma * (reference_nominal - reference_realized)
+    targets = executed + gamma * (reference_prediction - reference_target)
     return tuple(
         FADAOnlineSample(pair, target[None].to(pair.snapshot.action_snapshot))
         for pair, target in zip(trajectories, targets)

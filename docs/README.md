@@ -44,7 +44,7 @@ uv run --frozen --no-sync python scripts/run_oat_experiment.py --cfg job
 [`oat_experiment.yaml`](../conf/distill/oat_experiment.yaml) requires the caller's
 `task_owner`, checkpoint, command, duration, seed, payload, shared optimizer settings,
 and explicit environment overrides. It does not inherit the `straight_payload` Demo.
-Groups are `fada_ttt`, `online_reference`, `action_snapshot`, `no_anchor`, and `full_oat`;
+Groups are `fada_ttt`, `online_reference`, `self_supervised_correction`, `no_anchor`, and `full_oat`;
 only FADA-TTT and No anchor force the anchor coefficient to zero.
 An explicit empty `env_overrides: {}` accepts the selected task's environment defaults;
 it does not certify them as an approved formal protocol.

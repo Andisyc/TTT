@@ -90,7 +90,7 @@ def _expert_inputs(family):
 
 @pytest.mark.parametrize("family", ["legacy", "official"])
 @pytest.mark.parametrize("mode, expected", [
-    ("trajectory_base", 0.61), ("action_base", 0.62), ("trajectory_lora", 0.64),
+    ("trajectory_base", 0.61), ("self_supervised_correction", 0.58), ("trajectory_lora", 0.64),
 ])
 @pytest.mark.parametrize("gamma", [0.0, 0.1])
 def test_expert_modes_numeric_targets_and_isolation(family, mode, expected, gamma):
@@ -130,7 +130,7 @@ def test_expert_modes_numeric_targets_and_isolation(family, mode, expected, gamm
     matched_target = build_expert_samples(
         reference, (matched,), gamma=gamma, runtime_spec=spec, mode=mode,
     )[0].target_action
-    matched_expected = 0.6 + gamma * 0.1 if mode == "action_base" else 0.6
+    matched_expected = 0.6 - gamma * 0.1 if mode == "self_supervised_correction" else 0.6
     torch.testing.assert_close(matched_target, torch.full((1, 29), matched_expected))
     with torch.no_grad():
         reference.coefficients.add_(10)
@@ -153,7 +153,7 @@ def test_expert_modes_real_tracker_runtime_and_guards(config, family):
         }).eval()
     _, pair = _expert_inputs(family)
     spec = get_fada_runtime_spec(policy)
-    for mode in ("trajectory_base", "action_base"):
+    for mode in ("trajectory_base", "self_supervised_correction"):
         with pytest.raises(ValueError, match="must be frozen"):
             build_expert_samples(policy.idm, (pair,), gamma=0.1, runtime_spec=spec, mode=mode)
     moving_target = build_expert_samples(
@@ -166,7 +166,7 @@ def test_expert_modes_real_tracker_runtime_and_guards(config, family):
     with pytest.raises(ValueError, match="unsupported online target mode"):
         build_expert_samples(policy.idm, (pair,), gamma=0.1, runtime_spec=spec, mode="invalid")
     policy.idm.train()
-    for mode in ("trajectory_base", "action_base", "trajectory_lora"):
+    for mode in ("trajectory_base", "self_supervised_correction", "trajectory_lora"):
         with pytest.raises(ValueError, match="eval mode"):
             build_expert_samples(policy.idm, (pair,), gamma=0.1, runtime_spec=spec, mode=mode)
     assert all(module.training for module in policy.idm.modules())

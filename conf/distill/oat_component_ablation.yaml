@@ -1,5 +1,5 @@
 # Table 3: same command, single payload attachment, fresh process per trial.
-methods: [fada_ttt, online_reference, action_snapshot, full_oat]
+methods: [fada_ttt, online_reference, self_supervised_correction, full_oat]
 payloads_kg: [2, 4, 6, 8]
 repeats: 10
 first_seed: 0

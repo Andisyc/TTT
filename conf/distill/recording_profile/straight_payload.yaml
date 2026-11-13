@@ -52,6 +52,7 @@ env:
 
 online_adaptation:
   enabled: true
+  window_size: ${online_adaptation.update_interval}  # Match the check interval unless explicitly overridden.
 
 video_recording:
   duration_s: 120.0  # 30 seconds before payload, then 90 seconds with payload.

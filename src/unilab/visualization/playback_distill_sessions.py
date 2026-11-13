@@ -638,7 +638,10 @@ def create_fada_playback_session(
                     "reduction=mean_batch_action, gamma=not_applicable, sigma=0, "
                 )
             else:
-                objective = "action_residual" if online.mode == "action_base" else "expert_trajectory_difference"
+                objective = (
+                    "self_supervised_correction" if online.mode == "self_supervised_correction"
+                    else "expert_trajectory_difference"
+                )
                 reference = "current_lora" if online.mode == "trajectory_lora" else "frozen_base"
                 method_details = (
                     f"objective={objective}, reference={reference}, "

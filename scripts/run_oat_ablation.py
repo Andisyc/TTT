@@ -14,7 +14,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--repeats", type=int)
     parser.add_argument("--first-seed", type=int)
-    parser.add_argument("--methods", nargs="+", choices=("fada_ttt", "online_reference", "action_snapshot", "full_oat"))
+    parser.add_argument("--methods", nargs="+", choices=("fada_ttt", "online_reference", "self_supervised_correction", "full_oat"))
     parser.add_argument("--payloads-kg", nargs="+", type=float)
     parser.add_argument("--reference-run-dir", help="Explicit common reference template; supports {payload_kg} and {seed}")
     parser.add_argument("--resume", action="store_true", help="Skip verified completed trials from the identical batch plan")

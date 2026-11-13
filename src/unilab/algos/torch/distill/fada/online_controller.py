@@ -34,10 +34,10 @@ class FADAOnlineAdaptationConfig:
     lora_rank: int = 8
     lora_alpha: float = 16.0
     lora_dropout: float = 0.05
-    mode: Literal["trajectory_base", "action_base", "trajectory_lora", "fada_ttt"] = "trajectory_base"
+    mode: Literal["trajectory_base", "self_supervised_correction", "trajectory_lora", "fada_ttt"] = "trajectory_base"
 
     def __post_init__(self) -> None:
-        if self.mode not in ("trajectory_base", "action_base", "trajectory_lora", "fada_ttt"):
+        if self.mode not in ("trajectory_base", "self_supervised_correction", "trajectory_lora", "fada_ttt"):
             raise ValueError(f"unsupported online target mode: {self.mode!r}")
         if self.mode == "fada_ttt" and self.sigma != 0.0:
             raise ValueError("FADA-TTT requires sigma=0; OAT parameter anchoring is not part of its objective")
@@ -81,7 +81,7 @@ class OnlineAdaptationController:
         max_grad_norm: float | None = 1.0,
         device: str | torch.device = "cpu",
         playback: Any | None = None,
-        mode: Literal["trajectory_base", "action_base", "trajectory_lora", "fada_ttt"] = "trajectory_base",
+        mode: Literal["trajectory_base", "self_supervised_correction", "trajectory_lora", "fada_ttt"] = "trajectory_base",
     ) -> None:
         FADAOnlineAdaptationConfig(
             enabled=True, window_size=window_size, gamma=gamma, sigma=sigma,

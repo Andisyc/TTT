@@ -202,7 +202,7 @@ _ONLINE = {
 }
 
 
-@pytest.mark.parametrize("mode", [None, "trajectory_base", "action_base", "trajectory_lora"])
+@pytest.mark.parametrize("mode", [None, "trajectory_base", "self_supervised_correction", "trajectory_lora"])
 def test_disabled_preserves_checkpoint_actions_and_parameters(policy, checkpoint_file, mode):
     env = _FakeEnv(np.random.default_rng(0))
     wrapped = _FakeWrappedEnv(env, env._rng)
@@ -553,7 +553,7 @@ def _mode_session(policy, mode, checkpoint_file=None):
     return session
 
 
-@pytest.mark.parametrize("mode", ["trajectory_base", "action_base", "trajectory_lora", "fada_ttt"])
+@pytest.mark.parametrize("mode", ["trajectory_base", "self_supervised_correction", "trajectory_lora", "fada_ttt"])
 @pytest.mark.parametrize("via_factory", [False, True])
 def test_controller_mode_updates_use_preupdate_targets_and_retain_learning(
     policy, monkeypatch, mode, checkpoint_file, via_factory,
@@ -588,11 +588,11 @@ def test_controller_mode_updates_use_preupdate_targets_and_retain_learning(
                     target = snapshot.action_snapshot
                 else:
                     realized = reference(*inputs, sample.trajectory.realized_future)[:, 0]
-                    nominal = (
-                        snapshot.action_snapshot if mode == "action_base"
-                        else reference(*inputs, snapshot.nominal_future)[:, 0]
-                    )
-                    target = snapshot.action_snapshot + 0.05 * (nominal - realized)
+                    if mode == "self_supervised_correction":
+                        correction = realized - snapshot.action_snapshot
+                    else:
+                        correction = reference(*inputs, snapshot.nominal_future)[:, 0] - realized
+                    target = snapshot.action_snapshot + 0.05 * correction
                 torch.testing.assert_close(sample.target_action, target, rtol=1e-6, atol=1e-7)
                 assert not sample.target_action.requires_grad and sample.target_action.grad_fn is None
                 expected_targets.append(target.clone())
@@ -652,7 +652,7 @@ def test_controller_mode_updates_use_preupdate_targets_and_retain_learning(
         assert session.last_update_stats is None
 
 
-@pytest.mark.parametrize("mode", ["trajectory_base", "action_base", "trajectory_lora", "fada_ttt"])
+@pytest.mark.parametrize("mode", ["trajectory_base", "self_supervised_correction", "trajectory_lora", "fada_ttt"])
 def test_controller_mode_failed_labels_preserve_window_and_parameters(policy, mode):
     session = _mode_session(policy, mode)
     for _ in range(HORIZON + 1):
@@ -735,7 +735,7 @@ def official_controller_inputs():
     return policy, playback, physical, expected_compact
 
 
-@pytest.mark.parametrize("mode", ["trajectory_base", "action_base", "trajectory_lora", "fada_ttt"])
+@pytest.mark.parametrize("mode", ["trajectory_base", "self_supervised_correction", "trajectory_lora", "fada_ttt"])
 def test_official_controller_modes_complete_two_phase_aligned_updates(official_controller_inputs, monkeypatch, mode):
     policy, playback, physical, expected_compact = official_controller_inputs
     controller = OnlineAdaptationController(
@@ -794,10 +794,14 @@ def test_official_controller_modes_complete_two_phase_aligned_updates(official_c
                 expected_regression = torch.nn.functional.mse_loss(predicted, expected_target)
             else:
                 realized_action = reference(observations, history_actions, command, realized, history_valid_mask=mask)[:, 0]
-                nominal_action = saved_action if mode == "action_base" else reference(
-                    observations, history_actions, command, nominal, history_valid_mask=mask,
-                )[:, 0]
-                expected_target = saved_action + 0.05 * (nominal_action - realized_action)
+                if mode == "self_supervised_correction":
+                    correction = realized_action - saved_action
+                else:
+                    nominal_action = reference(
+                        observations, history_actions, command, nominal, history_valid_mask=mask,
+                    )[:, 0]
+                    correction = nominal_action - realized_action
+                expected_target = saved_action + 0.05 * correction
                 expected_regression = 0.5 * (predicted - expected_target).square().sum(dim=-1).mean()
         target = torch.cat([sample.target_action for sample in samples])
         torch.testing.assert_close(target, expected_target, rtol=1e-6, atol=1e-7)

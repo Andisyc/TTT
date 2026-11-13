@@ -302,7 +302,7 @@ demo:
 
 online_adaptation:
   enabled: false
-  mode: trajectory_base  # OAT; action_base / trajectory_lora are component variants; fada_ttt requires sigma=0.
+  mode: trajectory_base  # OAT; self_supervised_correction / trajectory_lora are component variants; fada_ttt requires sigma=0.
   window_size: 10
   warmup_steps: 40
   gamma: 0.05  # Not used by fada_ttt; these defaults do not define a formal experiment protocol.

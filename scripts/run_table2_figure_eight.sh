@@ -129,6 +129,10 @@ with TemporaryDirectory(prefix='table2_g1_scene_') as tmp:
             'env.runtime_payload.half_size_m=[0.08,0.06,0.12]',
             'experiment_recording.enabled=true', f'video_recording.duration_s={(approach_steps + 2080) * 0.02}',
             'video_recording.show_status_overlay=false',
+            'demo.rendering.show_reference_route=false',
+            # 2080 steps, at most one rising contact edge per foot every two steps.
+            'demo.footprints.max_records=2080',
+            'demo.rendering.max_footprint_markers=${demo.footprints.max_records}',
         ])
     if payload_enabled:
         # Match the Table 2 straight-approach learning budget and method settings.

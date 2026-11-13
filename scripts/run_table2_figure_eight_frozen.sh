@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 usage() {
-  printf 'Usage: %s --checkpoint PATH --duration-s SECONDS --output-dir DIR [--method LABEL] [--no-payload] [--official-profile-path PATH]\n' "$0"
+  printf 'Usage: %s --checkpoint PATH --duration-s SECONDS --output-dir DIR [--method LABEL] [--payload-kg KG (default: 8)] [--official-profile-path PATH]\n' "$0"
 }
 
 CHECKPOINT= DURATION= OUT= METHOD=figure-eight
-NO_PAYLOAD=false OFFICIAL_PROFILE=
+PAYLOAD_KG=8 OFFICIAL_PROFILE=
 while (( $# )); do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --no-payload) NO_PAYLOAD=true; shift ;;
-    --checkpoint|--duration-s|--output-dir|--method|--official-profile-path)
+    --checkpoint|--duration-s|--output-dir|--method|--payload-kg|--official-profile-path)
       if (( $# < 2 )) || [[ -z "$2" || "$2" == --* ]]; then
         printf 'Missing value for %s\n' "$1" >&2
         exit 2
@@ -20,6 +19,7 @@ while (( $# )); do
         --duration-s) DURATION=$2 ;;
         --output-dir) OUT=$2 ;;
         --method) METHOD=$2 ;;
+        --payload-kg) PAYLOAD_KG=$2 ;;
         --official-profile-path) OFFICIAL_PROFILE=$2 ;;
       esac
       shift 2 ;;
@@ -44,7 +44,7 @@ test -r "$TABLE"
 mkdir -p "$(dirname "$OUT")"
 mkdir "$OUT"
 echo "Running $METHOD; log: $OUT/run.log"
-env LD_PRELOAD=/lib/x86_64-linux-gnu/libgcc_s.so.1 MUJOCO_GL=egl PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH="$PWD/src" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 uv run --frozen --no-sync python - "$METHOD" "$CHECKPOINT" "$TABLE" "$OUT" "$DURATION" "$NO_PAYLOAD" "$OFFICIAL_PROFILE" > "$OUT/run.log" 2>&1 <<'PY'
+env LD_PRELOAD=/lib/x86_64-linux-gnu/libgcc_s.so.1 MUJOCO_GL=egl PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH="$PWD/src" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 uv run --frozen --no-sync python - "$METHOD" "$CHECKPOINT" "$TABLE" "$OUT" "$DURATION" "$PAYLOAD_KG" "$OFFICIAL_PROFILE" > "$OUT/run.log" 2>&1 <<'PY'
 import math
 import sys
 from pathlib import Path
@@ -68,7 +68,13 @@ from unilab.visualization.playback_controls import _build_playback_config
 method = sys.argv[1]
 checkpoint, table, out = [Path(x).resolve() for x in sys.argv[2:5]]
 duration_s = float(sys.argv[5])
-payload_enabled = sys.argv[6] != 'true'
+try:
+    payload_kg = float(sys.argv[6])
+except ValueError:
+    raise ValueError('--payload-kg must be finite and nonnegative') from None
+if not math.isfinite(payload_kg) or payload_kg < 0:
+    raise ValueError('--payload-kg must be finite and nonnegative')
+payload_enabled = payload_kg > 0
 official_profile = Path(sys.argv[7]).resolve() if sys.argv[7] else None
 if not math.isfinite(duration_s) or duration_s <= 0:
     raise ValueError('--duration-s must be finite and positive')
@@ -105,7 +111,7 @@ with TemporaryDirectory(prefix='table2_g1_scene_') as tmp:
             'training.device=cuda', 'online_adaptation.enabled=false',
             f'env.runtime_payload.enabled={str(payload_enabled).lower()}',
             'env.runtime_payload.body_name=torso_link',
-            f'env.runtime_payload.added_mass_kg={8.0 if payload_enabled else 0.0}',
+            f'env.runtime_payload.added_mass_kg={payload_kg}',
             'env.runtime_payload.attach_time_s=0.0',
             'env.runtime_payload.attachment_pos_m=[0.004,0.22,0.15]',
             'env.runtime_payload.half_size_m=[0.08,0.06,0.12]',
@@ -147,9 +153,8 @@ with TemporaryDirectory(prefix='table2_g1_scene_') as tmp:
                     state = session.env.state
                     if step == 1:
                         mass = state.info['runtime_payload_added_mass_kg'][0]
-                        expected_mass = 8.0 if payload_enabled else 0.0
-                        if not np.isclose(mass, expected_mass):
-                            raise RuntimeError(f'Expected {expected_mass:g} kg on the first physics step, got {mass:g} kg')
+                        if not np.isclose(mass, payload_kg):
+                            raise RuntimeError(f'Expected {payload_kg:g} kg on the first physics step, got {mass:g} kg')
                     measure()
                     if np.any(state.terminated):
                         reason = 'terminated'

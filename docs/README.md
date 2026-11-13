@@ -106,11 +106,13 @@ Compare `--param sigma --values 0 1e-4` without changing the original loaded pre
 
 ## Table 3 component ablation batches
 
-`conf/distill/oat_component_ablation.yaml` defines four methods, 2/4/6/8 kg
-left-shoulder payloads, and seeds 0--9: 160 trials. Each trial runs in a fresh
-Python process, walks unloaded without updates for 10 s, attaches its payload,
-then adapts for 20 s. OAT variants retain T=10, gamma=0.05 and sigma=1e-4;
-FADA-TTT uses its inverse-dynamics objective with sigma=0.
+`conf/distill/oat_component_ablation.yaml` runs four methods at 8 kg with
+seeds 0--9. Each isolated trial uses `straight_payload` at 0.4 m/s, enables
+online updates after a 40-step warm-up, and attaches the load at 10 s. The
+default horizon is 120 s, with T=5 and five samples per update. Unlike standalone
+recording, the batch explicitly seeds each trial and stops on its first termination
+or truncation. OAT variants use gamma=0.05 and sigma=1e-4; FADA-TTT uses its
+inverse-dynamics objective with sigma=0.
 
 The batch parent imports only configuration and file-summary helpers. Policy,
 simulator and recording dependencies are loaded only inside the trial worker;

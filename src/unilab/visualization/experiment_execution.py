@@ -39,10 +39,9 @@ def _required(options: dict[str, Any], key: str) -> Any:
 
 
 def build_experiment_config(options: DictConfig | Mapping[str, Any], *, root_dir: str | Path) -> DictConfig:
-    """Compose the task owner, then apply only the explicit trial protocol.
+    """Compose the task and any explicitly selected recording profile, then apply the trial protocol.
 
-    An empty env_overrides explicitly accepts that task's environment settings;
-    no straight_payload profile or hard-coded checkpoint/velocity is inherited.
+    An empty env_overrides preserves the composed environment settings.
     The returned config, including the input protocol, is saved by the recorder.
     """
     node = options if isinstance(options, DictConfig) else OmegaConf.create(dict(options))
@@ -120,11 +119,14 @@ def build_experiment_config(options: DictConfig | Mapping[str, Any], *, root_dir
             raise ValueError("invalid evaluation time origin")
         if not np.isfinite([evaluation["start_s"], evaluation["end_s"]]).all() or evaluation["start_s"] >= evaluation["end_s"]:
             raise ValueError("evaluation requires finite start_s < end_s")
+    overrides = [f"task={task}"]
+    if values.get("recording_profile") is not None:
+        overrides.append(f"recording_profile={values['recording_profile']}")
     if GlobalHydra.instance().is_initialized():
-        base = compose(config_name="config", overrides=[f"task={task}"])
+        base = compose(config_name="config", overrides=overrides)
     else:
         with initialize_config_dir(config_dir=str(Path(root_dir).resolve() / "conf" / "distill"), version_base="1.3"):
-            base = compose(config_name="config", overrides=[f"task={task}"])
+            base = compose(config_name="config", overrides=overrides)
     cfg = OmegaConf.create(OmegaConf.to_container(base, resolve=True))
     values.update(checkpoint_path=str(checkpoint), output_dir=str(output), command=command.tolist())
     cfg = OmegaConf.merge(cfg, {

@@ -68,8 +68,6 @@ def plan_ablation_trials(
         if type(update_interval) is not int or update_interval < 1:
             raise ValueError("--update-interval must be a positive integer")
         protocol["online"].update(update_interval=update_interval, window_size=update_interval)
-    if int(protocol["online"]["warmup_steps"]) <= math.ceil(attach / dt):
-        raise ValueError("warmup_steps must prevent online updates before attachment")
     trials = []
     for method in methods:
         for mass in masses:

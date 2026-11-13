@@ -103,6 +103,12 @@ def build_experiment_config(options: DictConfig | Mapping[str, Any], *, root_dir
                 raise ValueError(f"payload.{key} must be a finite 3-vector (half sizes strictly positive)")
     else:
         payload = {"enabled": False}  # Unused null fields must not overwrite task values.
+    export_s = values.get("export_adapted_after_payload_s")
+    if export_s is not None:
+        if isinstance(export_s, bool) or not isinstance(export_s, (int, float)) or not math.isfinite(export_s) or export_s <= 0:
+            raise ValueError("export_adapted_after_payload_s must be finite and positive")
+        if not payload["enabled"] or payload["added_mass_kg"] <= 0 or payload.get("additional_mass_events"):
+            raise ValueError("adapted checkpoint export requires one positive payload attachment")
     interval = values.get("progress_interval_s", 1.0)
     if not np.isfinite(interval) or interval <= 0:
         raise ValueError("progress_interval_s must be positive")
@@ -194,6 +200,15 @@ def run_oat_experiment(
                 raise ValueError("timing_ctrl_dt_s differs from the checkpoint environment ctrl_dt")
             total = math.ceil(float(settings["duration_s"]) / dt - 1e-9)
             total = max(1, total)
+            export_s = settings.get("export_adapted_after_payload_s")
+            attach_step = None
+            loaded_updates = 0
+            if export_s is not None:
+                if session.official_adapter is not None:
+                    raise ValueError("adapted checkpoint export requires a native Planner–IDM checkpoint")
+                budget_steps = math.ceil(export_s / dt - 1e-9)
+                if budget_steps < 1 or total != math.ceil(settings["payload"]["attach_time_s"] / dt) + budget_steps:
+                    raise ValueError("duration_s must end at the requested post-attachment export budget")
             session.set_autoreset(False)
             session.reset()
             video = settings.get("video") or {}
@@ -228,11 +243,15 @@ def run_oat_experiment(
                 state = session.env.state
                 terminated = bool(np.any(state.terminated))
                 truncated = bool(np.any(state.truncated))
+                if export_s is not None and bool(state.info.get("runtime_payload_attached_this_step", [False])[0]):
+                    attach_step = step - 1  # Payload attaches before this step's physics.
                 if capture is not None:
                     capture(step, final=step == total or terminated or truncated)
                 stats = session.last_update_stats
                 if stats is not None:
                     updates += 1
+                    if attach_step is not None:
+                        loaded_updates += 1
                     log(f"[OAT UPDATE] step={step}/{total} sim_time={step * dt:g}s {stats}")
                     session.last_update_stats = None
                 now = time.monotonic()
@@ -247,6 +266,36 @@ def run_oat_experiment(
                            requested_duration_s=float(settings["duration_s"]), actual_duration_s=step * dt)
             result.update(stop_reason=stop_reason, executed_steps=step, planned_steps=total,
                           actual_duration_s=step * dt, completed_updates=updates)
+        if export_s is not None:
+            if stop_reason != "duration_reached":
+                result["adapted_checkpoint_status"] = "early_stop"
+            elif attach_step is None or step - attach_step != budget_steps:
+                result["adapted_checkpoint_status"] = "payload_budget_not_met"
+            elif not loaded_updates:
+                result["adapted_checkpoint_status"] = "no_loaded_updates"
+            else:
+                from unilab.algos.torch.distill.fada.adaptation_checkpoint import save_fada_online_inference_checkpoint
+
+                controller = session.controller
+                checkpoint = save_fada_online_inference_checkpoint(
+                    output / "adapted.pt", controller.policy,
+                    lora_config=controller.updater.lora_config,
+                    source_checkpoint_sha256=recorder.checkpoint_sha256,
+                    source_runtime_config=session.source_runtime_config,
+                    completed_steps=step,
+                    online_trial={
+                        "run_id": recorder.run_id, "group": settings["group"], "seed": settings["seed"],
+                        "source_checkpoint_path": settings["checkpoint_path"],
+                        "payload": settings["payload"], "command": settings["command"],
+                        "ctrl_dt": dt, "payload_attach_step": attach_step,
+                        "loaded_steps": step - attach_step, "completed_updates": updates,
+                        "loaded_updates": loaded_updates,
+                    },
+                )
+                result.update(adapted_checkpoint_status="saved", adapted_checkpoint_path=str(checkpoint))
+                log(f"[OAT] Adapted checkpoint saved: {checkpoint}")
+            if result["adapted_checkpoint_status"] != "saved":
+                log(f"[OAT] Adapted checkpoint not saved: {result['adapted_checkpoint_status']}")
     finally:
         session.wrapped_env.close()
     evaluation: dict[str, Any] = dict(settings.get("evaluation") or {"enabled": False})

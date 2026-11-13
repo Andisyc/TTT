@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
@@ -357,6 +357,7 @@ class FADAPlaybackSession(RslRlPlaybackSession):
         self.command_program = command_program
         self.footprint_recorder = footprint_recorder
         self.last_update_stats: dict[str, float | int] | None = None
+        self.source_runtime_config: Mapping[str, Any] = {}
         self.experiment_recorder: ExperimentRecorder | None = None
         self._recorded_policy_action: torch.Tensor | None = None
         super().__init__(policy=None, **kwargs)

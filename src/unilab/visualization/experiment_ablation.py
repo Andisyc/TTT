@@ -21,7 +21,7 @@ METHODS = ("fada_ttt", "online_reference", "self_supervised_correction", "full_o
 
 def plan_ablation_trials(
     config: DictConfig, *, output_dir: Path, update_interval: int | None = None,
-    duration_s: float | None = None,
+    duration_s: float | None = None, export_adapted_after_payload_s: float | None = None,
 ) -> list[dict[str, Any]]:
     """Materialize explicit method/mass/seed identities without creating files."""
     methods = list(config.methods)
@@ -53,6 +53,15 @@ def plan_ablation_trials(
     attach = float(payload["attach_time_s"])
     if not all(math.isfinite(x) for x in (duration, attach)) or not 0 <= attach < duration:
         raise ValueError("recording duration must be finite and extend beyond payload attachment")
+    if export_adapted_after_payload_s is not None:
+        budget = export_adapted_after_payload_s
+        if not math.isfinite(budget) or budget <= 0:
+            raise ValueError("--export-adapted-after-payload-s must be finite and positive")
+        if duration_s is not None:
+            raise ValueError("Use either --duration-s or --export-adapted-after-payload-s, not both")
+        protocol["export_adapted_after_payload_s"] = budget
+        duration_s = (math.ceil(attach / dt) + math.ceil(budget / dt - 1e-9)) * dt
+        duration = duration_s
     horizon = math.ceil(duration / dt - 1e-9) * dt
     if duration_s is not None:
         protocol["duration_s"] = duration
@@ -136,6 +145,13 @@ def _load_completed_trial(trial: dict[str, Any]) -> dict[str, Any] | None:
         raise ValueError(f"Saved trial is unfinished or has incorrect method/seed identity: {path}")
     if not (path / "trial.mp4").is_file():
         raise FileNotFoundError(f"Completed trial has no requested video: {path}")
+    if trial.get("export_adapted_after_payload_s") is not None:
+        export_status = row.get("adapted_checkpoint_status")
+        checkpoint = path / "adapted.pt"
+        if export_status == "saved" and checkpoint.is_file():
+            row["adapted_checkpoint_path"] = str(checkpoint)
+        elif export_status not in {"early_stop", "payload_budget_not_met", "no_loaded_updates"} or checkpoint.exists():
+            raise ValueError(f"Saved trial has inconsistent adapted checkpoint output: {path}")
     if row["evaluation"] == "completed":
         summary_path = path / "evaluation" / "summary.json"
         evaluation = json.loads(summary_path.read_text())

@@ -395,6 +395,10 @@ def create_fada_playback_session(
         from unilab.algos.torch.distill.fada_playback import FADAPlaybackController
 
         loaded = resolved_deps["load_fada_policy"](checkpoint, device=device_name)
+        from unilab.algos.torch.distill.fada.adaptation_checkpoint import FADA_ONLINE_INFERENCE_SCHEMA_VERSION
+
+        if online_enabled and loaded.checkpoint.get("schema_version") == FADA_ONLINE_INFERENCE_SCHEMA_VERSION:
+            raise ValueError("online inference checkpoints require online_adaptation.enabled=false")
         from unilab.algos.torch.distill.fada.checkpoint import LoadedOfficialFADAStudentPolicy
         if isinstance(loaded, LoadedOfficialFADAStudentPolicy):
             from unilab.algos.torch.distill.fada.official_deployment import load_official_playback_profile
@@ -670,6 +674,8 @@ def create_fada_playback_session(
             command_program=command_program,
             footprint_recorder=footprint_recorder,
         )
+        if playback_cfg.action_mode == "policy":
+            session.source_runtime_config = loaded.checkpoint.get("runtime_config") or {}
         if experiment_recording is not None:
             from unilab.visualization.experiment_recording import ExperimentRecorder, experiment_run_metadata
 

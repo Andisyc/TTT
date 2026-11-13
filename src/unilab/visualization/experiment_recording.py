@@ -137,6 +137,10 @@ class ExperimentRecorder:
         self._write_metadata()
         self._events = (self.output_dir / "events.jsonl").open("x", encoding="utf-8")
 
+    @property
+    def checkpoint_sha256(self) -> str:
+        return self._metadata["checkpoint_sha256"]
+
     def _write_metadata(self) -> None:
         temporary = self.output_dir / "run_config.json.tmp"
         with temporary.open("w", encoding="utf-8") as stream:

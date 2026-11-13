@@ -5,6 +5,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 import torch
@@ -37,6 +38,7 @@ from unilab.algos.torch.distill.fada.target_data import (
 FADA_ADAPTED_CHECKPOINT_SCHEMA_VERSION = "fada-adapted/v3"
 FADA_LEGACY_ADAPTED_CHECKPOINT_SCHEMA_VERSION = "fada-adapted/v1"
 FADA_LEGACY_LINEAR_ADAPTED_CHECKPOINT_SCHEMA_VERSION = "fada-adapted/v2"
+FADA_ONLINE_INFERENCE_SCHEMA_VERSION = "fada-online-inference/v1"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -204,10 +206,44 @@ def save_fada_adapted_checkpoint(
     return target
 
 
+def save_fada_online_inference_checkpoint(
+    path: str | Path,
+    policy: FADAPlannerIDMPolicy,
+    *,
+    lora_config: FADALoRAConfig,
+    source_checkpoint_sha256: str,
+    source_runtime_config: Mapping[str, Any],
+    completed_steps: int,
+    online_trial: Mapping[str, Any],
+) -> Path:
+    """Publish the exact adapted inference policy, without optimizer or episode state."""
+    assert_fada_adaptation_parameter_ownership(policy, lora_config)
+    if lora_config.adapter_type != "qv_attention" or type(completed_steps) is not int or completed_steps < 1:
+        raise ValueError("online inference export requires Q/V LoRA and a completed rollout")
+    target = Path(path)
+    payload = {
+        "schema_version": FADA_ONLINE_INFERENCE_SCHEMA_VERSION,
+        "architecture": asdict(policy.config),
+        "lora_config": _lora_payload(lora_config),
+        "policy_state_dict": {name: value.detach().cpu() for name, value in policy.state_dict().items()},
+        "trainable_parameter_names": list(dict(fada_adapter_named_parameters(policy))),
+        "source_checkpoint_sha256": _validate_sha256("source_checkpoint_sha256", source_checkpoint_sha256),
+        "runtime_config": dict(source_runtime_config),
+        "completed_steps": completed_steps,
+        "online_trial": dict(online_trial),
+    }
+    with NamedTemporaryFile(dir=target.parent, prefix=f".{target.name}.") as stream:
+        torch.save(payload, stream)
+        stream.flush()
+        target.hardlink_to(stream.name)
+    return target
+
+
 def _parse_lora_config(payload: Any, *, schema_version: str) -> FADALoRAConfig:
     common = {"rank", "alpha", "dropout", "target_modules"}
     current = common | {"adapter_type", "target_projections"}
-    expected = current if schema_version == FADA_ADAPTED_CHECKPOINT_SCHEMA_VERSION else common
+    qv_schema = schema_version in {FADA_ADAPTED_CHECKPOINT_SCHEMA_VERSION, FADA_ONLINE_INFERENCE_SCHEMA_VERSION}
+    expected = current if qv_schema else common
     if not isinstance(payload, dict) or set(payload) != expected:
         raise ValueError("adapted checkpoint LoRA config or manifest is malformed")
     targets = payload.get("target_modules")
@@ -219,7 +255,7 @@ def _parse_lora_config(payload: Any, *, schema_version: str) -> FADALoRAConfig:
         "dropout": payload["dropout"],
         "target_modules": tuple(targets),
     }
-    if schema_version == FADA_ADAPTED_CHECKPOINT_SCHEMA_VERSION:
+    if qv_schema:
         projections = payload.get("target_projections")
         adapter_type = payload.get("adapter_type")
         if not isinstance(projections, list) or not all(
@@ -255,6 +291,7 @@ def _adapted_policy_from_payload(
         FADA_LEGACY_ADAPTED_CHECKPOINT_SCHEMA_VERSION,
         FADA_LEGACY_LINEAR_ADAPTED_CHECKPOINT_SCHEMA_VERSION,
         FADA_ADAPTED_CHECKPOINT_SCHEMA_VERSION,
+        FADA_ONLINE_INFERENCE_SCHEMA_VERSION,
     }:
         raise ValueError("unsupported or malformed FADA adapted checkpoint schema")
     architecture = payload.get("architecture")
@@ -265,6 +302,7 @@ def _adapted_policy_from_payload(
         in {
             FADA_LEGACY_LINEAR_ADAPTED_CHECKPOINT_SCHEMA_VERSION,
             FADA_ADAPTED_CHECKPOINT_SCHEMA_VERSION,
+            FADA_ONLINE_INFERENCE_SCHEMA_VERSION,
         }
         and "observation_contract" not in architecture
     ):
@@ -278,7 +316,7 @@ def _adapted_policy_from_payload(
     policy = FADAPlannerIDMPolicy(config)
     adapted = (
         inject_fada_idm_lora(policy, lora_config)
-        if schema_version == FADA_ADAPTED_CHECKPOINT_SCHEMA_VERSION
+        if schema_version in {FADA_ADAPTED_CHECKPOINT_SCHEMA_VERSION, FADA_ONLINE_INFERENCE_SCHEMA_VERSION}
         else _inject_fada_idm_legacy_linear_lora(policy, lora_config)
     )
     expected_trainable = list(dict(fada_adapter_named_parameters(adapted.policy)))
@@ -292,6 +330,16 @@ def _adapted_policy_from_payload(
     except RuntimeError as exc:
         raise ValueError("adapted checkpoint architecture or policy state is incompatible") from exc
     _validate_sha256("source_checkpoint_sha256", payload.get("source_checkpoint_sha256"))
+    if schema_version == FADA_ONLINE_INFERENCE_SCHEMA_VERSION:
+        if lora_config.adapter_type != "qv_attention":
+            raise ValueError("online inference checkpoint requires Q/V LoRA")
+        steps = payload.get("completed_steps")
+        if type(steps) is not int or steps <= 0:
+            raise ValueError("online inference checkpoint requires positive completed_steps")
+        if not isinstance(payload.get("runtime_config"), dict) or not isinstance(payload.get("online_trial"), dict):
+            raise ValueError("online inference checkpoint requires source and trial metadata")
+        adapted.policy.requires_grad_(False).to(device).eval()
+        return LoadedFADAPlannerIDMPolicy(policy=adapted.policy, checkpoint=payload)
     _validate_sha256("target_artifact_sha256", payload.get("target_artifact_sha256"))
     if schema_version == FADA_ADAPTED_CHECKPOINT_SCHEMA_VERSION:
         target_schema = payload.get("target_artifact_schema_version")
@@ -344,6 +392,7 @@ def load_fada_deployable_policy_checkpoint(
         FADA_LEGACY_ADAPTED_CHECKPOINT_SCHEMA_VERSION,
         FADA_LEGACY_LINEAR_ADAPTED_CHECKPOINT_SCHEMA_VERSION,
         FADA_ADAPTED_CHECKPOINT_SCHEMA_VERSION,
+        FADA_ONLINE_INFERENCE_SCHEMA_VERSION,
     }:
         return _adapted_policy_from_payload(payload, device=device)
     raise ValueError(f"unsupported FADA deployable checkpoint schema: {schema!r}")

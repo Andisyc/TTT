@@ -16,6 +16,7 @@ import torch
 from omegaconf import OmegaConf
 
 from unilab.algos.torch.distill.fada.adaptation import fada_adapter_parameters
+from unilab.algos.torch.distill.fada.adaptation_checkpoint import load_fada_deployable_policy_checkpoint
 from unilab.algos.torch.distill.fada.checkpoint import LoadedFADAPlannerIDMPolicy
 from unilab.algos.torch.distill.fada.model import FADAArchitectureConfig, FADAPlannerIDMPolicy
 from unilab.base.backend.base import SimBackend
@@ -230,6 +231,35 @@ def test_five_real_updates_record_and_evaluate(trial, group, mode, anchored):
     assert summary["episodes"][0]["velocity_observed_segment"]["E_lin_m_s"] > 0
     assert holder["env"].closed and holder["env"].reset_count == 1
     assert any("step=10/10" in message for message in messages)
+
+
+@pytest.mark.parametrize("early_stop", [False, True])
+def test_adapted_export_roundtrip(trial, early_stop):
+    options, deps, holder = trial
+    options["export_adapted_after_payload_s"] = 0.16
+    if early_stop:
+        holder["end"] = "terminated"
+    result = execution.run_oat_experiment(options, root_dir=ROOT, deps=deps, log=lambda _: None)
+    path = Path(options["output_dir"]) / "adapted.pt"
+    if early_stop:
+        assert result["adapted_checkpoint_status"] == "early_stop"
+        assert not path.exists()
+        return
+
+    assert result["adapted_checkpoint_status"] == "saved"
+    loaded = load_fada_deployable_policy_checkpoint(path)
+    assert loaded.checkpoint["completed_steps"] == 10
+    assert loaded.checkpoint["online_trial"]["payload_attach_step"] == 2
+    assert loaded.checkpoint["online_trial"]["loaded_steps"] == 8
+    assert loaded.checkpoint["online_trial"]["loaded_updates"] > 0
+    assert "optimizer_state_dict" not in loaded.checkpoint
+    assert not loaded.policy.training and all(not p.requires_grad for p in loaded.policy.parameters())
+    adapted = holder["controller"].policy
+    assert any(not torch.equal(before, after) for before, after in
+               zip(holder["initial_lora"], fada_adapter_parameters(adapted)))
+    inputs = (torch.full((1, 3, 66), 0.2), torch.full((1, 3, 29), -0.1), torch.tensor([[0.3, 0.0, 0.2]]))
+    with torch.no_grad():
+        torch.testing.assert_close(loaded.policy(*inputs).action, adapted(*inputs).action)
 
 
 @pytest.mark.parametrize("reason", ["terminated", "truncated"])

@@ -142,6 +142,12 @@ video duration, extend the episode timeout if needed, and evaluate through the
 last planned control step after attachment. Neither flag changes attachment or
 warm-up timing. Without these flags, the corresponding YAML settings apply.
 
+For fixed-budget adaptation before route evaluation, replace `--duration-s` with
+`--export-adapted-after-payload-s 30` and set `--forward-m-s 0.33` (Figure-Eight)
+or `--forward-m-s 0.20` (Pole Slalom). A trial saves `adapted.pt` only if it
+finishes the full loaded budget and updates under load. For frozen playback,
+set `training.play_checkpoint_path` to that file and disable online adaptation.
+
 Results live at `<output>/<method>/payload=<kg>/seed_<seed>/` with a video,
 `trial.json`, raw measurements and evaluation. Per-trial logs are in `logs/`;
 `summary.json` and `table3.csv` refresh after each trial. Fixed-window error

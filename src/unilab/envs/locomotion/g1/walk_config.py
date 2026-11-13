@@ -423,6 +423,8 @@ class G1RuntimePayloadConfig:
     attachment_pos_m: list[float] = field(default_factory=lambda: [0.004, 0.22, 0.15])
     half_size_m: list[float] = field(default_factory=lambda: [0.08, 0.06, 0.12])
     attach_time_s: float = 10.0
+    # Absolute episode time (s), then incremental kg, at the same box location.
+    additional_mass_events: list[list[float]] = field(default_factory=list)
 
     def validate(self) -> None:
         if not self.enabled:
@@ -439,6 +441,19 @@ class G1RuntimePayloadConfig:
             raise ValueError("env.runtime_payload.half_size_m must be a finite positive 3D vector")
         if not math.isfinite(float(self.attach_time_s)) or float(self.attach_time_s) < 0.0:
             raise ValueError("env.runtime_payload.attach_time_s must be finite and non-negative")
+        previous_time = float(self.attach_time_s)
+        cumulative_mass = float(self.added_mass_kg)
+        for event in self.additional_mass_events:
+            values = np.asarray(event, dtype=np.float64)
+            if values.shape != (2,) or not np.isfinite(values).all():
+                raise ValueError("runtime_payload.additional_mass_events requires finite [time_s, incremental_kg] pairs")
+            event_time, increment = values
+            if event_time <= previous_time or increment <= 0.0:
+                raise ValueError("runtime_payload.additional_mass_events requires increasing times and positive mass increments")
+            cumulative_mass += float(increment)
+            if not math.isfinite(cumulative_mass):
+                raise ValueError("runtime_payload cumulative added mass must be finite")
+            previous_time = float(event_time)
 
 
 @dataclass

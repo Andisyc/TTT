@@ -230,7 +230,12 @@ class ExperimentRecorder:
         self.last_done = terminated or truncated
         self._ended = self.last_done
         if terminated:
-            self.event("terminated")
+            causes = {
+                key: bool(np.asarray(state.info[key])[0])
+                for key in ("fall_terminated", "forward_progress_terminated")
+                if key in state.info
+            }
+            self.event("terminated", **causes)
         if truncated:
             self.event("truncated")
         if len(self._records) >= self.config.chunk_steps or self.last_done:

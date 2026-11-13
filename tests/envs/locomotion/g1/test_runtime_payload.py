@@ -146,3 +146,53 @@ def test_disabled_payload_leaves_backend_and_state_unmodified() -> None:
 def test_payload_rejects_invalid_box_dimensions(half_size) -> None:
     with pytest.raises(ValueError, match="half_size_m"):
         G1RuntimePayloadConfig(enabled=True, added_mass_kg=1.0, half_size_m=half_size).validate()
+
+
+def test_additional_mass_preserves_cumulative_state_reset_and_inertia() -> None:
+    backend = _FakeBackend()
+    owner = G1RuntimePayload(
+        backend, 2,
+        G1RuntimePayloadConfig(
+            enabled=True, added_mass_kg=6.0, attachment_pos_m=[0.0, 1.0, 0.0],
+            half_size_m=[0.1, 0.2, 0.3], attach_time_s=10.0,
+            additional_mass_events=[[20.0, 2.0]],
+        ), ctrl_dt=0.02,
+    )
+    info = {"steps": np.array([499, 499])}
+    owner.init_info(info)
+    owner.before_physics(info)
+    assert backend.calls == []
+    info["steps"][:] = [500, 499]
+    owner.before_physics(info)
+    np.testing.assert_array_equal(backend.calls[-1][0], [0])
+    np.testing.assert_allclose(backend.calls[-1][2], [[8.0]])
+    info["steps"][:] = [999, 500]
+    owner.before_physics(info)
+    np.testing.assert_array_equal(info[TRUTH_KEY_ADDED_MASS], [6.0, 6.0])
+    info["steps"][:] = [1000, 999]
+    owner.before_physics(info)
+    np.testing.assert_array_equal(backend.calls[-1][0], [0])
+    np.testing.assert_allclose(backend.calls[-1][2], [[10.0]])
+    np.testing.assert_allclose(backend.calls[-1][3], [[[0.0, 0.8, 0.0]]])
+    # Baseline 2kg + cumulative 8kg box: reduced mass 1.6kg, never 6+8kg.
+    expected = np.diag([1 + 8 * 0.13 / 3 + 1.6, 2 + 8 * 0.10 / 3, 2 + 8 * 0.05 / 3 + 1.6])
+    np.testing.assert_allclose(backend.calls[-1][4][0, 0], expected)
+    np.testing.assert_array_equal(info[TRUTH_KEY_ATTACHED], [True, False])
+    owner.reconcile_info(info)
+    np.testing.assert_array_equal(info[TRUTH_KEY_ADDED_MASS], [8.0, 6.0])
+    count = len(backend.calls)
+    owner.before_physics(info)
+    assert len(backend.calls) == count
+    owner.restore_before_reset(info, np.array([0]))
+    np.testing.assert_allclose(backend.calls[-1][2], [[2.0]])
+    np.testing.assert_allclose(backend.calls[-1][4][0, 0], np.diag([1.0, 2.0, 2.0]))
+    np.testing.assert_array_equal(info[TRUTH_KEY_ADDED_MASS], [0.0, 6.0])
+    info["steps"][:] = [500, 1000]
+    owner.before_physics(info)
+    np.testing.assert_array_equal(info[TRUTH_KEY_ADDED_MASS], [6.0, 8.0])
+
+
+@pytest.mark.parametrize("events", [[[10.0, 2.0]], [[20.0, -2.0]], [[20.0, 2.0], [15.0, 1.0]], [[float("nan"), 2.0]]])
+def test_additional_mass_rejects_invalid_schedule(events) -> None:
+    with pytest.raises(ValueError, match="additional_mass_events"):
+        G1RuntimePayloadConfig(enabled=True, added_mass_kg=6.0, additional_mass_events=events).validate()

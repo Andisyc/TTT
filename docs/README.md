@@ -95,6 +95,49 @@ episode timeout together; unloaded evaluation retains its configured start time.
 Without either option, the YAML timing is unchanged. Dry-run output shows the
 resolved duration, attachment, warm-up and evaluation interval.
 
+The staged-load protocol `conf/distill/oat_sensitivity_staged_loaded.yaml` keeps
+the same OAT settings, attaches 6 kg at episode time 10 s, then adds 2 kg at
+20 s (8 kg cumulative). It runs for 70 s and evaluates the 60 s after the first
+attachment. `payload.additional_mass_events` contains `[absolute_time_s,
+incremental_kg]` pairs at the same attachment position and box dimensions;
+recorded `payload_applied.added_mass_kg` is the cumulative added mass.
+Reset restores the original body mass, COM and inertia and rearms every event.
+Compare `--param sigma --values 0 1e-4` without changing the original loaded preset.
+
+## Table 3 component ablation batches
+
+`conf/distill/oat_component_ablation.yaml` defines four methods, 2/4/6/8 kg
+left-shoulder payloads, and seeds 0--9: 160 trials. Each trial runs in a fresh
+Python process, walks unloaded without updates for 10 s, attaches its payload,
+then adapts for 20 s. OAT variants retain T=10, gamma=0.05 and sigma=1e-4;
+FADA-TTT uses its inverse-dynamics objective with sigma=0.
+
+```bash
+uv run --frozen --no-sync python scripts/run_oat_ablation.py \
+  --output-dir logs/oat_ablation/table3_v1
+```
+
+Add `--dry-run` to inspect the plan without creating outputs or starting a
+simulator. Add `--resume` with the same configuration to skip verified finalized
+trials and run missing ones. Changed protocols, partial trial directories and
+abandoned worker logs are rejected rather than overwritten or automatically
+retried. Use a new batch directory if a failed attempt left partial artifacts.
+`--methods`, `--payloads-kg`, `--repeats` and `--first-seed` can select a smaller
+new batch, including the exact missing method/mass/seed combination.
+
+Results live at `<output>/<method>/payload=<kg>/seed_<seed>/` with a video,
+`trial.json`, raw measurements and evaluation. Per-trial logs are in `logs/`;
+`summary.json` and `table3.csv` refresh after each trial. Fixed-window error
+means exclude incomplete windows but keep their counts and termination records.
+Survival uses the environment's explicit fall provenance; a completed time limit
+is not a fall, and other/unknown early terminations remain unclassified.
+
+Normalized velocity error requires an explicit common reference. Supply
+`--reference-run-dir '/path/to/reference/payload={payload_kg}/seed_{seed}/raw'`
+to use the existing evaluator's strict compatibility checks. Without it,
+normalization is marked `not_configured`, normalized CSV fields remain blank,
+and raw linear/angular velocity errors plus Roll RMSE are still collected.
+
 ## Isolated MuJoCo native lifecycle repair
 
 `patches/mujoco-uni-3.8.0-lifecycle.patch` targets the exact source archive locked

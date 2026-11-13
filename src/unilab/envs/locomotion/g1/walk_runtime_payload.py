@@ -36,14 +36,11 @@ class G1RuntimePayload:
         self._backend = backend
         self._num_envs = int(num_envs)
         self._enabled = bool(config.enabled)
-        self._added_mass_kg = float(config.added_mass_kg)
-        self._attach_steps = 0
+        self._stages: list[tuple[int, float, np.ndarray, np.ndarray]] = []
         self._body_ids: np.ndarray | None = None
         self._baseline_mass = 0.0
         self._baseline_com = np.zeros(3, dtype=np.float64)
-        self._target_com = np.zeros(3, dtype=np.float64)
         self._baseline_inertia = np.zeros((3, 3), dtype=np.float64)
-        self._target_inertia = np.zeros((3, 3), dtype=np.float64)
         self._scratch = np.zeros((self._num_envs,), dtype=bool)
         if not self._enabled:
             return
@@ -55,7 +52,6 @@ class G1RuntimePayload:
         body_name = str(config.body_name)
         if not body_name:
             raise ValueError("runtime payload requires a non-empty body_name")
-        self._attach_steps = int(math.ceil(float(config.attach_time_s) / float(ctrl_dt)))
         body_id = int(backend.get_body_id(body_name))
         self._body_ids = np.asarray([body_id], dtype=np.int64)
         self._baseline_mass = float(np.asarray(backend.get_body_mass())[body_id])
@@ -67,22 +63,27 @@ class G1RuntimePayload:
         )[body_id].copy()
         if not math.isfinite(self._baseline_mass) or self._baseline_mass <= 0.0:
             raise ValueError("runtime payload baseline body mass must be finite and positive")
-        target_mass = self._baseline_mass + self._added_mass_kg
-        if target_mass <= 0.0:
-            raise ValueError("runtime payload total body mass must be positive")
-        # Rigidly combine the original body and an axis-aligned finite-size box.
+        # Precompute every cumulative rigid-box state on the cold init path.
+        # All increments occupy the configured box volume at the same attachment.
         position = np.asarray(config.attachment_pos_m, dtype=np.float64)
         half_size = np.asarray(config.half_size_m, dtype=np.float64)
         displacement = position - self._baseline_com
-        self._target_com = self._baseline_com + (self._added_mass_kg / target_mass) * displacement
         hx2, hy2, hz2 = half_size * half_size
-        box_inertia = np.diag(
-            (self._added_mass_kg / 3.0) * np.asarray([hy2 + hz2, hx2 + hz2, hx2 + hy2])
-        )
-        reduced_mass = self._baseline_mass * self._added_mass_kg / target_mass
-        self._target_inertia = self._baseline_inertia + box_inertia + reduced_mass * (
-            np.dot(displacement, displacement) * np.eye(3) - np.outer(displacement, displacement)
-        )
+        added_mass = 0.0
+        events = [(float(config.attach_time_s), float(config.added_mass_kg))]
+        events.extend((float(time_s), float(increment)) for time_s, increment in config.additional_mass_events)
+        for time_s, increment in events:
+            added_mass += increment
+            target_mass = self._baseline_mass + added_mass
+            target_com = self._baseline_com + (added_mass / target_mass) * displacement
+            box_inertia = np.diag(
+                (added_mass / 3.0) * np.asarray([hy2 + hz2, hx2 + hz2, hx2 + hy2])
+            )
+            reduced_mass = self._baseline_mass * added_mass / target_mass
+            target_inertia = self._baseline_inertia + box_inertia + reduced_mass * (
+                np.dot(displacement, displacement) * np.eye(3) - np.outer(displacement, displacement)
+            )
+            self._stages.append((int(math.ceil(time_s / ctrl_dt)), added_mass, target_com, target_inertia))
 
     @property
     def enabled(self) -> bool:
@@ -114,8 +115,7 @@ class G1RuntimePayload:
             self.init_info(info)
             return
         event.fill(False)
-        added.fill(0.0)
-        added[active] = self._added_mass_kg
+        added[~active] = 0.0
 
     def before_physics(self, info: dict) -> None:
         """Attach the payload at the scheduled episode step, before the physics step."""
@@ -126,23 +126,25 @@ class G1RuntimePayload:
         event = info[TRUTH_KEY_ATTACHED]
         event.fill(False)
         steps = np.asarray(info["steps"])
-        np.greater_equal(steps, self._attach_steps, out=self._scratch)
-        self._scratch[active] = False
-        if not np.any(self._scratch):
-            return
-        env_ids = np.flatnonzero(self._scratch).astype(np.int64)
-        assert self._body_ids is not None
-        num_attach = int(env_ids.size)
-        self._backend.set_body_mass_and_com(
-            env_ids,
-            self._body_ids,
-            mass=np.full((num_attach, 1), self._baseline_mass + self._added_mass_kg),
-            center_of_mass=np.tile(self._target_com, (num_attach, 1, 1)),
-            inertia_tensor=np.broadcast_to(self._target_inertia, (num_attach, 1, 3, 3)),
-        )
-        active[env_ids] = True
-        event[env_ids] = True
-        info[TRUTH_KEY_ADDED_MASS][env_ids] = self._added_mass_kg
+        added = info[TRUTH_KEY_ADDED_MASS]
+        for attach_steps, added_mass, target_com, target_inertia in self._stages:
+            np.greater_equal(steps, attach_steps, out=self._scratch)
+            self._scratch[added >= added_mass] = False
+            if not np.any(self._scratch):
+                continue
+            env_ids = np.flatnonzero(self._scratch).astype(np.int64)
+            assert self._body_ids is not None
+            num_attach = int(env_ids.size)
+            self._backend.set_body_mass_and_com(
+                env_ids,
+                self._body_ids,
+                mass=np.full((num_attach, 1), self._baseline_mass + added_mass),
+                center_of_mass=np.tile(target_com, (num_attach, 1, 1)),
+                inertia_tensor=np.broadcast_to(target_inertia, (num_attach, 1, 3, 3)),
+            )
+            active[env_ids] = True
+            event[env_ids] = True
+            added[env_ids] = added_mass
 
     def reset_info_updates(self, env_indices: np.ndarray) -> dict[str, np.ndarray]:
         """Zeroed per-row truth values for the reset info carrier."""

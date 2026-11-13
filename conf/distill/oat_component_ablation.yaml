@@ -1,0 +1,72 @@
+# Table 3: same command, single payload attachment, fresh process per trial.
+methods: [fada_ttt, online_reference, action_snapshot, full_oat]
+payloads_kg: [2, 4, 6, 8]
+repeats: 10
+first_seed: 0
+protocol:
+  task_owner: g1_walk_flat/mujoco
+  checkpoint_path: /ssd1/cyx/TTT/logs/fada/oracle/20261111_102618/student_iter_0031.pt
+  device: cuda
+  command: [0.6, 0.0, 0.0]
+  duration_s: 30.0
+  timing_ctrl_dt_s: 0.02  # Seconds-to-steps conversion; checked against the loaded environment.
+  env_overrides:
+    max_episode_seconds: 31.0
+    reset_base_qvel_limit: 0.0
+    standing_reset_base_qvel_limit: 0.0
+    noise_config:
+      level: 0.0
+    commands:
+      random_height_during_walking: false
+    domain_rand:
+      randomize_reset_pose: false
+      randomize_kp: false
+      randomize_kd: false
+      randomize_base_mass: false
+      randomize_body_mass: false
+      random_com: false
+      randomize_gravity: false
+      randomize_ground_friction: false
+      randomize_dof_armature: false
+      randomize_dof_position_bias: false
+      randomize_control_delay: false
+      torque_rfi_fraction: 0.0
+      push_robots: false
+      actuator_strength:
+        enabled: false
+        curriculum_enabled: false
+        group_curriculum_enabled: false
+  payload:
+    enabled: true
+    body_name: torso_link
+    added_mass_kg: 6.0
+    attachment_pos_m: [0.004, 0.22, 0.15]
+    half_size_m: [0.08, 0.06, 0.12]
+    attach_time_s: 10.0
+  online:
+    window_size: 10
+    warmup_steps: 501
+    update_interval: 10
+    gamma: 0.05
+    sigma: 1.0e-4
+    learning_rate: 1.0e-4
+    max_grad_norm: 1.0
+    lora_rank: 8
+    lora_alpha: 16.0
+    lora_dropout: 0.05
+  evaluation:
+    enabled: true
+    linear_frame: body_xy
+    sample_phase: completed
+    relative_to: payload
+    payload_event_index: 0
+    start_s: 0.0
+    end_s: 20.0
+    curve_window_s: 0.2
+    attitude_reference: [0.0, 0.0]
+    attitude_unit: deg
+    attitude_aggregation: rms
+    action_source: policy_action
+    action_joint_reduction: mean
+
+    reference_run_dir: null # Supply an explicit common reference; never infer a denominator.

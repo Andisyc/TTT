@@ -142,6 +142,8 @@ with TemporaryDirectory(prefix='table2_g1_scene_') as tmp:
         cfg.online_adaptation.mode = GROUP_MODES[method]
         if method == 'fada_ttt':
             cfg.online_adaptation.sigma = 0.0
+        else:
+            cfg.online_adaptation.gamma = 1.0
     else:
         method = 'nominal'
     cfg.training.play_checkpoint_path = str(checkpoint)

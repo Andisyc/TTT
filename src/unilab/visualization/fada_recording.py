@@ -126,7 +126,7 @@ def capture_fada_trial(
     camera = mujoco.MjvCamera()
     rendering = FADAPlaybackRendering(session, model, args, render_config)
     rendering.initialize_camera(camera)
-    font = ImageFont.load_default(size=max(12, config.height // 40))
+    font = ImageFont.load_default(size=max(12, config.height // 40)) if config.show_status_overlay else None
     frame_index = 0
 
     with (
@@ -146,12 +146,14 @@ def capture_fada_trial(
             rendering.update_camera(camera, data)
             renderer.update_scene(data, camera=camera)
             rendering.append_scene(renderer.scene, data)
-            status = rendering.status(data)
-            image = _annotate_frame(
-                renderer.render(), title=label,
-                details=(f"Simulation time: {elapsed:.2f} s", status.title, *status.details),
-                alert=status.alert, loaded=status.loaded, font=font,
-            )
+            image = renderer.render()
+            if font is not None:
+                status = rendering.status(data)
+                image = _annotate_frame(
+                    image, title=label,
+                    details=(f"Simulation time: {elapsed:.2f} s", status.title, *status.details),
+                    alert=status.alert, loaded=status.loaded, font=font,
+                )
             for _ in range(count):
                 writer.add_image(image)
             frame_index += count

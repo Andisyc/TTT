@@ -99,6 +99,7 @@ with TemporaryDirectory(prefix='table2_g1_scene_') as tmp:
             'env.runtime_payload.attachment_pos_m=[0.004,0.22,0.15]',
             'env.runtime_payload.half_size_m=[0.08,0.06,0.12]',
             'experiment_recording.enabled=true', f'video_recording.duration_s={duration_s}',
+            'video_recording.show_status_overlay=false',
         ])
     cfg.training.play_checkpoint_path = str(checkpoint)
     OmegaConf.update(cfg, 'training.fada.scene_model_file', str(scene), force_add=True)

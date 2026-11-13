@@ -32,6 +32,12 @@ Normalization requires an explicitly selected compatible reference run; attitude
 action diagnostics require their conventions to be supplied. Raw done flags do not
 define falls or survival. No position/path-success metrics are inferred from these recordings.
 
+For Figure-Eight geometry, use `scripts/evaluate_figure_eight.py` with
+`--trajectory` and `--reference` pointing to the recorded trial and measured
+unloaded `trajectory.npz` files. Supply `--closure-tol-m` explicitly. The command
+prints first-cycle lobe area error and arc-length-matched position RMSE as JSON;
+an incomplete cycle or missed crossing produces no scores.
+
 ## Headless OAT component trials
 
 `scripts/run_oat_experiment.py` runs one explicitly selected group and seed without

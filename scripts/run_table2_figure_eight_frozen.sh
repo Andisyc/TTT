@@ -1,19 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /ssd1/cyx/TTT
-ROOT=logs/oat_adapted/figure_eight_8kg_T5_v1
-TABLE=logs/fada_online/v14_g8_return_trim/right_less05.npz
-OUT=logs/oat_routes/table2_eight_8kg_frozen_seed0_v1
-for METHOD in fada_ttt full_oat; do
-  test -r "$ROOT/$METHOD/payload=8/seed_0/adapted.pt"
+usage() {
+  printf 'Usage: %s --checkpoint PATH --duration-s SECONDS --output-dir DIR [--method LABEL]\n' "$0"
+}
+
+CHECKPOINT= DURATION= OUT= METHOD=figure-eight
+while (( $# )); do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --checkpoint|--duration-s|--output-dir|--method)
+      if (( $# < 2 )) || [[ -z "$2" || "$2" == --* ]]; then
+        printf 'Missing value for %s\n' "$1" >&2
+        exit 2
+      fi
+      case "$1" in
+        --checkpoint) CHECKPOINT=$2 ;;
+        --duration-s) DURATION=$2 ;;
+        --output-dir) OUT=$2 ;;
+        --method) METHOD=$2 ;;
+      esac
+      shift 2 ;;
+    *) printf 'Unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
 done
+if [[ -z "$CHECKPOINT" || -z "$DURATION" || -z "$OUT" ]]; then
+  usage >&2
+  exit 2
+fi
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+TABLE=logs/fada_online/v14_g8_return_trim/right_less05.npz
+if [[ ! -f "$CHECKPOINT" || ! -r "$CHECKPOINT" ]]; then
+  printf 'Checkpoint not readable: %s\n' "$CHECKPOINT" >&2
+  exit 1
+fi
 test -r "$TABLE"
 mkdir -p "$(dirname "$OUT")"
 mkdir "$OUT"
-for METHOD in fada_ttt full_oat; do
-  echo "Running $METHOD; log: $OUT/$METHOD/run.log"
-  mkdir "$OUT/$METHOD"
-  env LD_PRELOAD=/lib/x86_64-linux-gnu/libgcc_s.so.1 MUJOCO_GL=egl PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH="$PWD/src" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 uv run --frozen --no-sync python - "$METHOD" "$ROOT/$METHOD/payload=8/seed_0/adapted.pt" "$TABLE" "$OUT/$METHOD" > "$OUT/$METHOD/run.log" 2>&1 <<'PY'
+echo "Running $METHOD; log: $OUT/run.log"
+env LD_PRELOAD=/lib/x86_64-linux-gnu/libgcc_s.so.1 MUJOCO_GL=egl PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH="$PWD/src" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 uv run --frozen --no-sync python - "$METHOD" "$CHECKPOINT" "$TABLE" "$OUT" "$DURATION" > "$OUT/run.log" 2>&1 <<'PY'
+import math
 import sys
 from pathlib import Path
 from shutil import copytree
@@ -34,7 +59,10 @@ from unilab.visualization.playback_cli import _build_play_args
 from unilab.visualization.playback_controls import _build_playback_config
 
 method = sys.argv[1]
-checkpoint, table, out = [Path(x).resolve() for x in sys.argv[2:]]
+checkpoint, table, out = [Path(x).resolve() for x in sys.argv[2:5]]
+duration_s = float(sys.argv[5])
+if not math.isfinite(duration_s) or duration_s <= 0:
+    raise ValueError('--duration-s must be finite and positive')
 root = Path.cwd()
 original = FigureEightCommandProgram.from_config.__func__
 
@@ -72,7 +100,7 @@ with TemporaryDirectory(prefix='table2_g1_scene_') as tmp:
             'env.runtime_payload.attachment_pos_m=[0.004,0.22,0.15]',
             'env.runtime_payload.half_size_m=[0.08,0.06,0.12]',
             'experiment_recording.enabled=true', f'experiment_recording.output_dir={out}/raw',
-            f'video_recording.output_path={out}/trial.mp4', 'video_recording.duration_s=null',
+            f'video_recording.output_path={out}/trial.mp4', f'video_recording.duration_s={duration_s}',
         ])
     args = _build_play_args(cfg, algo='fada')
     session, _, _ = create_fada_playback_session(
@@ -80,9 +108,10 @@ with TemporaryDirectory(prefix='table2_g1_scene_') as tmp:
     )
     try:
         program = session.command_program
-        dt, steps = program.ctrl_dt, program.total_control_steps
-        if not np.isclose(dt, 0.02) or steps != 2080:
-            raise ValueError('Expected one 41.6 s v14 cycle')
+        dt = program.ctrl_dt
+        if not np.isclose(dt, 0.02) or program.total_control_steps != 2080:
+            raise ValueError('Expected a 41.6 s v14 command cycle')
+        steps = max(1, math.ceil(duration_s / dt - 1e-9))
         video = FADAVideoRecordingConfig(**OmegaConf.to_container(cfg.video_recording, resolve=True))
         render = FADADemoRenderConfig(**OmegaConf.to_container(cfg.demo.rendering, resolve=True))
         positions, quats = [], []
@@ -93,7 +122,8 @@ with TemporaryDirectory(prefix='table2_g1_scene_') as tmp:
             session.set_autoreset(False)
             session.reset()
             measure()
-            reason = 'command_cycle_completed'
+            completed = 'command_cycle_completed' if steps % program.total_control_steps == 0 else 'duration_reached'
+            reason = completed
             with capture_fada_trial(session, args, video, label=method, render_config=render) as capture:
                 capture(0)
                 for step in range(1, steps + 1):
@@ -106,7 +136,7 @@ with TemporaryDirectory(prefix='table2_g1_scene_') as tmp:
                         reason = 'terminated'
                     elif np.any(state.truncated):
                         reason = 'truncated'
-                    done = reason != 'command_cycle_completed'
+                    done = reason != completed
                     capture(step, final=done or step == steps)
                     if done:
                         break
@@ -118,5 +148,4 @@ with TemporaryDirectory(prefix='table2_g1_scene_') as tmp:
     finally:
         session.wrapped_env.close()
 PY
-  tail -n 1 "$OUT/$METHOD/run.log"
-done
+tail -n 1 "$OUT/run.log"

@@ -18,6 +18,7 @@ from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import DictConfig, OmegaConf
 
+from unilab.visualization.experiment_common import GROUP_MODES
 from unilab.algos.torch.distill.fada.online_controller import FADAOnlineAdaptationConfig
 from unilab.training.seed import apply_training_seed
 from unilab.visualization.experiment_evaluation import EvaluationWindowUnavailable, evaluate_experiment
@@ -25,13 +26,6 @@ from unilab.visualization.experiment_recording import experiment_recording_run
 from unilab.visualization.playback_distill_sessions import create_fada_playback_session
 from unilab.visualization.playback_sessions import RslRlPlaybackConfig
 
-GROUP_MODES = {
-    "fada_ttt": "fada_ttt",
-    "online_reference": "trajectory_lora",
-    "action_snapshot": "action_base",
-    "no_anchor": "trajectory_base",
-    "full_oat": "trajectory_base",
-}
 _ONLINE_FIELDS = (
     "window_size", "warmup_steps", "update_interval", "gamma", "sigma", "learning_rate",
     "max_grad_norm", "lora_rank", "lora_alpha", "lora_dropout",

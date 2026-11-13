@@ -20,8 +20,8 @@ from unilab.algos.torch.distill.fada.checkpoint import (
     FADA_CHECKPOINT_SCHEMA_VERSION,
     LoadedFADAPlannerIDMPolicy,
     LoadedOfficialFADAStudentPolicy,
-    load_fada_policy_checkpoint,
-    load_official_fada_playback_checkpoint,
+    _fada_policy_from_payload,
+    _official_playback_from_payload,
 )
 from unilab.algos.torch.distill.fada.model import FADAArchitectureConfig, FADAPlannerIDMPolicy
 from unilab.algos.torch.distill.fada.privileged_oracle import (
@@ -243,7 +243,14 @@ def load_fada_adapted_checkpoint(
 ) -> LoadedFADAPlannerIDMPolicy:
     """Fresh-construct and strict-load one self-contained adapted policy."""
 
-    payload = torch.load(Path(path), map_location=device, weights_only=True)
+    payload = torch.load(Path(path), map_location="cpu", weights_only=True)
+    return _adapted_policy_from_payload(payload, device=device)
+
+
+def _adapted_policy_from_payload(
+    payload: Any, *, device: str | torch.device,
+) -> LoadedFADAPlannerIDMPolicy:
+    """Restore adapters from the same CPU payload used for format selection."""
     if not isinstance(payload, dict) or payload.get("schema_version") not in {
         FADA_LEGACY_ADAPTED_CHECKPOINT_SCHEMA_VERSION,
         FADA_LEGACY_LINEAR_ADAPTED_CHECKPOINT_SCHEMA_VERSION,
@@ -268,7 +275,7 @@ def load_fada_adapted_checkpoint(
         raise ValueError("adapted checkpoint architecture is invalid") from exc
     schema_version = str(payload["schema_version"])
     lora_config = _parse_lora_config(payload.get("lora_config"), schema_version=schema_version)
-    policy = FADAPlannerIDMPolicy(config).to(device)
+    policy = FADAPlannerIDMPolicy(config)
     adapted = (
         inject_fada_idm_lora(policy, lora_config)
         if schema_version == FADA_ADAPTED_CHECKPOINT_SCHEMA_VERSION
@@ -310,6 +317,7 @@ def load_fada_adapted_checkpoint(
     if not isinstance(payload.get("runtime_config"), dict):
         raise ValueError("adapted checkpoint runtime_config must be a mapping")
     assert_fada_adaptation_parameter_ownership(adapted.policy, adapted.lora_config)
+    adapted.policy.to(device)
     adapted.policy.eval()
     return LoadedFADAPlannerIDMPolicy(policy=adapted.policy, checkpoint=payload)
 
@@ -325,17 +333,17 @@ def load_fada_deployable_policy_checkpoint(
     if not isinstance(payload, dict):
         raise ValueError("unsupported or malformed FADA deployable checkpoint schema")
     if payload.get("format") == "unilab_official_fada_student":
-        return load_official_fada_playback_checkpoint(path, device=device)
+        return _official_playback_from_payload(payload, device=device)
     if "model_state_dict" in payload and "compact_obs" in payload and "cfg" in payload:
-        from unilab.algos.torch.distill.fada.upstream_checkpoint import load_upstream_fada_checkpoint
-        return load_upstream_fada_checkpoint(path, device=device)
+        from unilab.algos.torch.distill.fada.upstream_checkpoint import _upstream_policy_from_payload
+        return _upstream_policy_from_payload(payload, device=device)
     schema = payload.get("schema_version")
     if schema in {1, 2, 3, FADA_CHECKPOINT_SCHEMA_VERSION}:
-        return load_fada_policy_checkpoint(path, device=device)
+        return _fada_policy_from_payload(payload, device=device)
     if schema in {
         FADA_LEGACY_ADAPTED_CHECKPOINT_SCHEMA_VERSION,
         FADA_LEGACY_LINEAR_ADAPTED_CHECKPOINT_SCHEMA_VERSION,
         FADA_ADAPTED_CHECKPOINT_SCHEMA_VERSION,
     }:
-        return load_fada_adapted_checkpoint(path, device=device)
+        return _adapted_policy_from_payload(payload, device=device)
     raise ValueError(f"unsupported FADA deployable checkpoint schema: {schema!r}")

@@ -24,6 +24,14 @@ def load_upstream_fada_checkpoint(
     source: Mapping[str, Any] | None = None,
 ) -> LoadedOfficialFADAStudentPolicy:
     payload = torch.load(Path(path), map_location="cpu", weights_only=True)
+    return _upstream_policy_from_payload(payload, device=device, source=source)
+
+
+def _upstream_policy_from_payload(
+    payload: Any, *, device: str | torch.device,
+    source: Mapping[str, Any] | None = None,
+) -> LoadedOfficialFADAStudentPolicy:
+    """Restore the author's source-bound model from an already loaded CPU payload."""
     if not isinstance(payload, dict) or not isinstance(payload.get("cfg"), dict):
         raise ValueError("expected the original FADA cfg/model_state_dict checkpoint")
     binding = source if source is not None else payload.get("unilab_upstream_source")
@@ -47,8 +55,9 @@ def load_upstream_fada_checkpoint(
         "term_order": compact["term_order"], "term_scale": compact["term_scale"],
         "term_noise": compact["term_noise"], "noise_enabled": compact["noise_enabled"],
     })
-    policy: Any = build_official_fada_student(model_config, device=device)
+    policy: Any = build_official_fada_student(model_config, device="cpu")
     policy.load_state_dict(payload["model_state_dict"], strict=True)
+    policy.to(device)
     policy.official_preprocessing = preprocessing
     policy.official_source_identity = identity
     checkpoint = {

@@ -9,7 +9,7 @@ import pytest
 from omegaconf import DictConfig, OmegaConf
 
 from unilab.visualization import experiment_ablation as batch
-from unilab.visualization.experiment_execution import GROUP_MODES
+from unilab.visualization.experiment_common import GROUP_MODES
 
 ROOT = Path(__file__).resolve().parents[2]
 

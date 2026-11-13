@@ -14,8 +14,7 @@ from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
 
-from unilab.visualization.experiment_execution import GROUP_MODES, run_oat_experiment
-from unilab.visualization.experiment_sensitivity import _read_trial_metrics, _summarize, _write_json
+from unilab.visualization.experiment_common import GROUP_MODES, _read_trial_metrics, _summarize, _write_json
 
 METHODS = ("fada_ttt", "online_reference", "action_snapshot", "full_oat")
 
@@ -90,6 +89,8 @@ def classify_survival(events: list[dict[str, Any]], result: dict[str, Any], dura
 
 def run_ablation_trial(trial: dict[str, Any], *, root_dir: Path) -> dict[str, Any]:
     """Child-process boundary; keep simulation and optimizer ownership unchanged."""
+    from unilab.visualization.experiment_execution import run_oat_experiment
+
     result = run_oat_experiment(trial, root_dir=root_dir)
     full, metrics = _read_trial_metrics(result)
     raw = Path(result["raw_dir"])

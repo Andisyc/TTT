@@ -112,6 +112,16 @@ Python process, walks unloaded without updates for 10 s, attaches its payload,
 then adapts for 20 s. OAT variants retain T=10, gamma=0.05 and sigma=1e-4;
 FADA-TTT uses its inverse-dynamics objective with sigma=0.
 
+The batch parent imports only configuration and file-summary helpers. Policy,
+simulator and recording dependencies are loaded only inside the trial worker;
+the parent waits for that worker to exit before launching the next. Deployment
+loads each checkpoint once onto CPU, validates and restores the selected model
+from that same payload, then transfers only the model to its target device.
+Inference metadata and optimizer payloads stay on CPU; checkpoint schemas,
+strict validation and training-resume loaders are unchanged. This removes
+redundant loading and runtime ownership ambiguity, not proof that every
+intermittent native/runtime fault has been eliminated.
+
 ```bash
 uv run --frozen --no-sync python scripts/run_oat_ablation.py \
   --output-dir logs/oat_ablation/table3_v1

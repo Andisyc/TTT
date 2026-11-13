@@ -184,8 +184,14 @@ def load_fada_policy_checkpoint(
 ) -> LoadedFADAPlannerIDMPolicy:
     """Construct an inference-only Planner-IDM policy from checkpoint-owned architecture."""
 
-    # B1: 只读取 tensor 与基础类型, 并在模型构造前关闭 schema/architecture 不匹配.
-    payload = torch.load(Path(path), map_location=device, weights_only=True)
+    payload = torch.load(Path(path), map_location="cpu", weights_only=True)
+    return _fada_policy_from_payload(payload, device=device)
+
+
+def _fada_policy_from_payload(
+    payload: Any, *, device: str | torch.device,
+) -> LoadedFADAPlannerIDMPolicy:
+    """Validate and restore one CPU-owned checkpoint without reopening its file."""
     if not isinstance(payload, dict) or payload.get("schema_version") not in {1, 2, 3, 4, 5}:
         raise ValueError("unsupported or malformed FADA checkpoint schema")
     config = load_architecture_config(
@@ -200,9 +206,10 @@ def load_fada_policy_checkpoint(
         _validate_schema5_training_state(payload)
 
     # B2: 严格恢复 Planner 与 IDM, 产出 eval 模式的唯一 playback policy owner.
-    policy = FADAPlannerIDMPolicy(config).to(device)
+    policy = FADAPlannerIDMPolicy(config)
     policy.planner.load_state_dict(payload["planner_state_dict"], strict=True)
     policy.idm.load_state_dict(payload["idm_state_dict"], strict=True)
+    policy.to(device)
     policy.eval()
     return LoadedFADAPlannerIDMPolicy(policy=policy, checkpoint=payload)
 
@@ -275,6 +282,11 @@ def _read_official_student_checkpoint(
     path: str | Path, *, map_location: str | torch.device
 ) -> dict[str, Any]:
     payload = torch.load(Path(path), map_location=map_location, weights_only=True)
+    return _validate_official_student_payload(payload)
+
+
+def _validate_official_student_payload(payload: Any) -> dict[str, Any]:
+    """Share strict format validation between file readers and deployment dispatch."""
     if (
         not isinstance(payload, dict)
         or payload.get("format") != _OFFICIAL_STUDENT_FORMAT
@@ -306,8 +318,9 @@ def _read_official_student_checkpoint(
 
 
 def _restore_official_student(payload: Mapping[str, Any], *, device: str | torch.device):
-    policy = build_official_fada_student(payload["model_config"], device=device)
+    policy = build_official_fada_student(payload["model_config"], device="cpu")
     policy.load_state_dict(payload["student_state_dict"], strict=True)
+    policy.to(device)
     policy.official_preprocessing = payload["preprocessing"]
     policy.official_source_identity = payload["source_identity"]
     return policy.eval()
@@ -317,14 +330,21 @@ def load_official_fada_student_checkpoint(
     path: str | Path, *, device: str | torch.device = "cpu"
 ) -> torch.nn.Module:
     """Inference-only loader usable directly by build_official_fada_runtime."""
-    payload = _read_official_student_checkpoint(path, map_location=device)
+    payload = _read_official_student_checkpoint(path, map_location="cpu")
     return _restore_official_student(payload, device=device)
 
 
 def load_official_fada_playback_checkpoint(
     path: str | Path, *, device: str | torch.device = "cpu"
 ) -> LoadedOfficialFADAStudentPolicy:
-    payload = _read_official_student_checkpoint(path, map_location=device)
+    payload = torch.load(Path(path), map_location="cpu", weights_only=True)
+    return _official_playback_from_payload(payload, device=device)
+
+
+def _official_playback_from_payload(
+    payload: Any, *, device: str | torch.device,
+) -> LoadedOfficialFADAStudentPolicy:
+    payload = _validate_official_student_payload(payload)
     return LoadedOfficialFADAStudentPolicy(
         policy=_restore_official_student(payload, device=device), checkpoint=payload
     )

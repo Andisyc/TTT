@@ -13,11 +13,9 @@ def main() -> None:
     parser.add_argument('--trajectory', type=Path, required=True, help='Recorded trial trajectory.npz')
     parser.add_argument('--reference', type=Path, required=True,
                         help='Measured unloaded trajectory.npz from the same command table')
-    parser.add_argument('--closure-tol-m', type=float, required=True,
-                        help='Maximum distance from the start at each scheduled crossing, in metres')
     args = parser.parse_args()
     try:
-        result = evaluate_figure_eight(args.trajectory, args.reference, closure_tol_m=args.closure_tol_m)
+        result = evaluate_figure_eight(args.trajectory, args.reference)
     except (OSError, ValueError, KeyError) as exc:
         parser.error(str(exc))
     print(json.dumps(result, ensure_ascii=False, allow_nan=False, indent=2))

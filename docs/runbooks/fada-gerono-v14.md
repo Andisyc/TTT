@@ -158,5 +158,5 @@ Ctrl-C 退出这个日志查看命令，不会停止已经通过 nohup 启动的
 - 三圈实测：最大分段位置误差约 36.5 厘米、最大交叉点／圈末位置误差约 17.6 厘米，第三圈整体倾角约右倾 0.2°。这些数值不能外推为五分钟都满足相同门槛。
 - 用户认可现有五分钟展示效果；约第五圈结束／第六圈开始（3:28–3:30）后可见轻微漂移。五分钟录像没有同步保存完整位姿序列，尚不能据此给出精确的长期定位误差。
 - 后续从本版本继续时，优先保留原表另存版本；不要用未验证的 v11–v13 候选替换，不需继续追求无限圈零误差。
-- Table 2 的冻结八字脚本 `scripts/run_table2_figure_eight_frozen.sh` 默认不绘制顶部状态栏，避免遮住机器人。`run.log` 和 `raw/` 仍照常记录。
-- 用 `--payload-kg 0` 录制空载轨迹；负重可指定 `--payload-kg 2`、`4`、`6` 或 `8`，省略时仍为 8 kg。官方学生 checkpoint 若未内嵌控制配置，须用 `--official-profile-path` 指定与其来源匹配的配置（包括 `sim_dt`）。冻结回放不要求 LoRA。
+- Table 2 入口为 `scripts/run_table2_figure_eight.sh --checkpoint BASE_PT --output-dir DIR --method full_oat --payload-kg 8 --approach-s 30`。用同一个未适应的基座分别运行 `full_oat`、`fada_ttt` 和 `--payload-kg 0` 空载参考。默认从首步加载，直行适应结束后从 v14 交叉点相位开始，冻结更新并走一圈；用 `--keep-updating` 做圈内继续更新的对照。
+- `raw/` 保留整趟记录，`trial.mp4` 与 `trajectory.npz` 只包含八字阶段；进场前终止时仅有 raw 记录和空轨迹，不生成视频。各方法与空载参考使用相同的 `--approach-s`。官方学生 checkpoint 未内嵌控制配置时，用 `--official-profile-path` 指定匹配的配置（包括 `sim_dt`）。

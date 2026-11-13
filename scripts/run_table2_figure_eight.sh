@@ -1,37 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 usage() {
-  printf 'Usage: %s --checkpoint PATH --duration-s SECONDS --output-dir DIR [--method LABEL] [--payload-kg KG (default: 8)] [--official-profile-path PATH]\n' "$0"
+  printf 'Usage: %s --checkpoint BASE_PT --output-dir DIR [--method full_oat|fada_ttt] [--payload-kg KG] [--approach-s SECONDS] [--keep-updating] [--command-table NPZ] [--official-profile-path PATH]\n' "$0"
 }
 
-CHECKPOINT= DURATION= OUT= METHOD=figure-eight
-PAYLOAD_KG=8 OFFICIAL_PROFILE=
+CHECKPOINT= OUT= METHOD=full_oat
+PAYLOAD_KG=8 APPROACH_S=30 KEEP_UPDATING=0 OFFICIAL_PROFILE=
+TABLE=logs/fada_online/v14_g8_return_trim/right_less05.npz
 while (( $# )); do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --checkpoint|--duration-s|--output-dir|--method|--payload-kg|--official-profile-path)
+    --keep-updating) KEEP_UPDATING=1; shift ;;
+    --checkpoint|--output-dir|--method|--payload-kg|--approach-s|--command-table|--official-profile-path)
       if (( $# < 2 )) || [[ -z "$2" || "$2" == --* ]]; then
         printf 'Missing value for %s\n' "$1" >&2
         exit 2
       fi
       case "$1" in
         --checkpoint) CHECKPOINT=$2 ;;
-        --duration-s) DURATION=$2 ;;
         --output-dir) OUT=$2 ;;
         --method) METHOD=$2 ;;
         --payload-kg) PAYLOAD_KG=$2 ;;
+        --approach-s) APPROACH_S=$2 ;;
+        --command-table) TABLE=$2 ;;
         --official-profile-path) OFFICIAL_PROFILE=$2 ;;
       esac
       shift 2 ;;
     *) printf 'Unknown argument: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
 done
-if [[ -z "$CHECKPOINT" || -z "$DURATION" || -z "$OUT" ]]; then
+if [[ -z "$CHECKPOINT" || -z "$OUT" ]]; then
   usage >&2
   exit 2
 fi
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
-TABLE=logs/fada_online/v14_g8_return_trim/right_less05.npz
 if [[ ! -f "$CHECKPOINT" || ! -r "$CHECKPOINT" ]]; then
   printf 'Checkpoint not readable: %s\n' "$CHECKPOINT" >&2
   exit 1
@@ -44,7 +46,7 @@ test -r "$TABLE"
 mkdir -p "$(dirname "$OUT")"
 mkdir "$OUT"
 echo "Running $METHOD; log: $OUT/run.log"
-env LD_PRELOAD=/lib/x86_64-linux-gnu/libgcc_s.so.1 MUJOCO_GL=egl PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH="$PWD/src" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 uv run --frozen --no-sync python - "$METHOD" "$CHECKPOINT" "$TABLE" "$OUT" "$DURATION" "$PAYLOAD_KG" "$OFFICIAL_PROFILE" > "$OUT/run.log" 2>&1 <<'PY'
+env LD_PRELOAD=/lib/x86_64-linux-gnu/libgcc_s.so.1 MUJOCO_GL=egl PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONPATH="$PWD/src" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 uv run --frozen --no-sync python - "$METHOD" "$CHECKPOINT" "$TABLE" "$OUT" "$APPROACH_S" "$PAYLOAD_KG" "$OFFICIAL_PROFILE" "$KEEP_UPDATING" > "$OUT/run.log" 2>&1 <<'PY'
 import math
 import sys
 from pathlib import Path
@@ -58,16 +60,18 @@ from unilab.envs.locomotion.g1.fada_privileged import build_g1_fada_checkpoint_l
 from unilab.training import ensure_registries
 from unilab.training.seed import apply_training_seed
 from unilab.visualization.demo_commands import FigureEightCommandProgram
+from unilab.visualization.experiment_common import GROUP_MODES
 from unilab.visualization.experiment_recording import experiment_recording_run
 from unilab.visualization.fada_recording import FADAVideoRecordingConfig, capture_fada_trial
 from unilab.visualization.fada_rendering import FADADemoRenderConfig
+from unilab.visualization.figure_eight_trial import run_figure_eight_trial
 from unilab.visualization.interactive_playback import create_fada_playback_session
 from unilab.visualization.playback_cli import _build_play_args
 from unilab.visualization.playback_controls import _build_playback_config
 
 method = sys.argv[1]
 checkpoint, table, out = [Path(x).resolve() for x in sys.argv[2:5]]
-duration_s = float(sys.argv[5])
+approach_s = float(sys.argv[5])
 try:
     payload_kg = float(sys.argv[6])
 except ValueError:
@@ -76,8 +80,16 @@ if not math.isfinite(payload_kg) or payload_kg < 0:
     raise ValueError('--payload-kg must be finite and nonnegative')
 payload_enabled = payload_kg > 0
 official_profile = Path(sys.argv[7]).resolve() if sys.argv[7] else None
-if not math.isfinite(duration_s) or duration_s <= 0:
-    raise ValueError('--duration-s must be finite and positive')
+keep_updating = sys.argv[8] == '1'
+if method not in ('full_oat', 'fada_ttt'):
+    raise ValueError('--method must be full_oat or fada_ttt')
+if keep_updating and not payload_enabled:
+    raise ValueError('--keep-updating is not supported for the unloaded reference')
+if not math.isfinite(approach_s) or approach_s <= 0:
+    raise ValueError('--approach-s must be finite and positive')
+approach_steps = math.ceil(approach_s / 0.02 - 1e-9)
+if approach_steps < 1:
+    raise ValueError('--approach-s must cover at least one control step')
 root = Path.cwd()
 original = FigureEightCommandProgram.from_config.__func__
 
@@ -108,16 +120,26 @@ with TemporaryDirectory(prefix='table2_g1_scene_') as tmp:
     with initialize_config_dir(config_dir=str(root / 'conf/distill'), version_base='1.3'):
         cfg = compose(config_name='config', overrides=[
             'task=g1_walk_flat/mujoco', 'recording_profile=figure_eight', 'algo.seed=0',
-            'training.device=cuda', 'online_adaptation.enabled=false',
+            'training.device=cuda',
             f'env.runtime_payload.enabled={str(payload_enabled).lower()}',
             'env.runtime_payload.body_name=torso_link',
             f'env.runtime_payload.added_mass_kg={payload_kg}',
             'env.runtime_payload.attach_time_s=0.0',
             'env.runtime_payload.attachment_pos_m=[0.004,0.22,0.15]',
             'env.runtime_payload.half_size_m=[0.08,0.06,0.12]',
-            'experiment_recording.enabled=true', f'video_recording.duration_s={duration_s}',
+            'experiment_recording.enabled=true', f'video_recording.duration_s={(approach_steps + 2080) * 0.02}',
             'video_recording.show_status_overlay=false',
         ])
+    if payload_enabled:
+        # Match the Table 2 straight-approach learning budget and method settings.
+        online = OmegaConf.load(root / 'conf/distill/oat_component_ablation.yaml').protocol.online
+        cfg.online_adaptation = OmegaConf.merge(cfg.online_adaptation, online)
+        cfg.online_adaptation.enabled = True
+        cfg.online_adaptation.mode = GROUP_MODES[method]
+        if method == 'fada_ttt':
+            cfg.online_adaptation.sigma = 0.0
+    else:
+        method = 'nominal'
     cfg.training.play_checkpoint_path = str(checkpoint)
     if official_profile is not None:
         cfg.official_playback.profile_path = str(official_profile)
@@ -133,42 +155,20 @@ with TemporaryDirectory(prefix='table2_g1_scene_') as tmp:
         dt = program.ctrl_dt
         if not np.isclose(dt, 0.02) or program.total_control_steps != 2080:
             raise ValueError('Expected a 41.6 s v14 command cycle')
-        steps = max(1, math.ceil(duration_s / dt - 1e-9))
+        if not np.allclose(program.reference_points[0], program.reference_points[len(program.commands) // 2]):
+            raise ValueError('Expected v14 segment 0 to start at the figure-eight crossing')
         video = FADAVideoRecordingConfig(**OmegaConf.to_container(cfg.video_recording, resolve=True))
         render = FADADemoRenderConfig(**OmegaConf.to_container(cfg.demo.rendering, resolve=True))
-        positions, quats = [], []
-        def measure():
-            positions.append(session.env.get_base_pos()[0].copy())
-            quats.append(session.env.get_base_quat()[0].copy())
+        def capture_trial():
+            return capture_fada_trial(session, args, video, label=method, render_config=render)
+
         with experiment_recording_run(session):
-            session.set_autoreset(False)
-            session.reset()
-            measure()
-            completed = 'command_cycle_completed' if steps % program.total_control_steps == 0 else 'duration_reached'
-            reason = completed
-            with capture_fada_trial(session, args, video, label=method, render_config=render) as capture:
-                capture(0)
-                for step in range(1, steps + 1):
-                    session.step_once()
-                    state = session.env.state
-                    if step == 1:
-                        mass = state.info['runtime_payload_added_mass_kg'][0]
-                        if not np.isclose(mass, payload_kg):
-                            raise RuntimeError(f'Expected {payload_kg:g} kg on the first physics step, got {mass:g} kg')
-                    measure()
-                    if np.any(state.terminated):
-                        reason = 'terminated'
-                    elif np.any(state.truncated):
-                        reason = 'truncated'
-                    done = reason != completed
-                    capture(step, final=done or step == steps)
-                    if done:
-                        break
-        np.savez_compressed(out / 'trajectory.npz', time_s=np.arange(step + 1) * dt,
-                            base_positions=np.asarray(positions), base_quats=np.asarray(quats),
-                            reference_points=program.reference_points, commands=program.commands,
-                            segment_steps=program.segment_steps, stop_reason=reason)
-        print(f'[eight] {reason}: {step}/{steps} steps, {step*dt:.2f} s')
+            reason, steps = run_figure_eight_trial(
+                session, approach_steps=approach_steps, payload_kg=payload_kg,
+                keep_updating=keep_updating, capture_trial=capture_trial,
+                trajectory_path=out / 'trajectory.npz',
+            )
+        print(f'[eight] {reason}: {steps}/{program.total_control_steps} figure-eight steps, {steps*dt:.2f} s')
     finally:
         session.wrapped_env.close()
 PY

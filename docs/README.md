@@ -34,9 +34,10 @@ define falls or survival. No position/path-success metrics are inferred from the
 
 For Figure-Eight geometry, use `scripts/evaluate_figure_eight.py` with
 `--trajectory` and `--reference` pointing to the recorded trial and measured
-unloaded `trajectory.npz` files. Supply `--closure-tol-m` explicitly. The command
-prints first-cycle lobe area error and arc-length-matched position RMSE as JSON;
-an incomplete cycle or missed crossing produces no scores.
+unloaded `trajectory.npz` files with the same approach duration and command table.
+The command prints position RMSE at matching command steps, after aligning the
+entry positions and headings. An incomplete cycle has no RMSE; a missed crossing
+is scored normally.
 
 ## Headless OAT component trials
 

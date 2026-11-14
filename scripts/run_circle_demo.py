@@ -1,4 +1,4 @@
-"""Record one unloaded FADA student trial under a fixed body-frame turn command."""
+"""Record one fixed-command circle trial with an optional online payload protocol."""
 from __future__ import annotations
 
 import argparse
@@ -17,6 +17,7 @@ from unilab.algos.torch.distill.fada.adaptation import fada_adapter_named_parame
 from unilab.training import ensure_registries
 from unilab.training.seed import apply_training_seed
 from unilab.visualization.circle_trial import run_circle_trial
+from unilab.visualization.experiment_common import GROUP_MODES
 from unilab.visualization.experiment_recording import experiment_recording_run
 from unilab.visualization.fada_recording import FADAVideoRecordingConfig, capture_fada_trial
 from unilab.visualization.fada_rendering import FADADemoRenderConfig
@@ -36,12 +37,30 @@ def main() -> None:
         help="Scene from the XML asset tree matched to the checkpoint",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--duration-s", type=float, default=75.0, help="Recording duration in simulation seconds (default: 75)")
+    parser.add_argument("--duration-s", type=float, default=75.0, help="Maximum simulation seconds to finish one lap (default: 75)")
+    parser.add_argument(
+        "--forward-m-s", type=float, default=0.33,
+        help="Fixed forward speed in m/s (default: 0.33)",
+    )
+    parser.add_argument(
+        "--yaw-rate-rad-s", type=float, default=0.20,
+        help="Fixed yaw rate in rad/s: positive for left, negative for right (default: 0.20)",
+    )
+    parser.add_argument("--method", choices=("frozen", "full_oat", "fada_ttt"), default="frozen")
+    parser.add_argument("--payload-kg", type=float, default=0.0, help="Payload mass applied on the first physics step (default: 0)")
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()
     duration_s = args.duration_s
     if not math.isfinite(duration_s) or duration_s <= 0:
         parser.error("--duration-s must be finite and positive")
+    if not math.isfinite(args.forward_m_s) or args.forward_m_s <= 0:
+        parser.error("--forward-m-s must be finite and positive")
+    if not math.isfinite(args.yaw_rate_rad_s) or args.yaw_rate_rad_s == 0:
+        parser.error("--yaw-rate-rad-s must be finite and nonzero")
+    if not math.isfinite(args.payload_kg) or args.payload_kg < 0:
+        parser.error("--payload-kg must be finite and nonnegative")
+    if args.method != "frozen" and args.payload_kg == 0:
+        parser.error("online circle methods require a positive --payload-kg")
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
         parser.error(f"Checkpoint not found: {checkpoint}")
@@ -65,6 +84,17 @@ def main() -> None:
                 "online_adaptation.enabled=false", "env.runtime_payload.enabled=false",
                 "experiment_recording.enabled=true", "video_recording.show_status_overlay=false",
             ])
+        if args.payload_kg > 0:
+            cfg.env.runtime_payload.enabled = True
+            cfg.env.runtime_payload.attach_time_s = 0.0
+            cfg.env.runtime_payload.added_mass_kg = args.payload_kg
+        if args.method != "frozen":
+            online = OmegaConf.load(ROOT / "conf/distill/oat_component_ablation.yaml").protocol.online
+            cfg.online_adaptation = OmegaConf.merge(cfg.online_adaptation, online)
+            cfg.online_adaptation.enabled = True
+            cfg.online_adaptation.mode = GROUP_MODES[args.method]
+            if args.method == "fada_ttt":
+                cfg.online_adaptation.sigma = 0.0
         cfg.training.play_checkpoint_path = str(checkpoint)
         cfg.training.device = args.device
         OmegaConf.update(cfg, "training.fada.scene_model_file", str(scene), force_add=True)
@@ -82,17 +112,15 @@ def main() -> None:
         try:
             with experiment_recording_run(session):
                 controller = session.controller
-                if controller is None or any(fada_adapter_named_parameters(controller.policy)):
-                    raise ValueError("Circle Demo requires a base checkpoint without LoRA adapters")
-                if session.env.cfg.runtime_payload.enabled:
-                    raise RuntimeError("Circle Demo requires an unloaded environment")
+                if controller is None or (args.method == "frozen" and any(fada_adapter_named_parameters(controller.policy))):
+                    raise ValueError("Frozen circle runs require a base checkpoint without LoRA adapters")
 
                 def capture_trial():
-                    return capture_fada_trial(session, play_args, video, label="Unloaded circle", render_config=render)
+                    return capture_fada_trial(session, play_args, video, label=f"Circle | {args.method}", render_config=render)
 
                 result = run_circle_trial(
-                    session, forward_m_s=0.33, yaw_rate_rad_s=0.20, duration_s=duration_s,
-                    settle_s=5.0, trajectory_path=output / "trajectory.npz", capture_trial=capture_trial,
+                    session, forward_m_s=args.forward_m_s, yaw_rate_rad_s=args.yaw_rate_rad_s, duration_s=duration_s,
+                    trajectory_path=output / "trajectory.npz", capture_trial=capture_trial,
                 )
         finally:
             session.wrapped_env.close()

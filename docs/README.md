@@ -39,6 +39,17 @@ The command prints position RMSE at matching command steps, after aligning the
 entry positions and headings. An incomplete cycle has no RMSE; a missed crossing
 is scored normally.
 
+`scripts/run_circle_demo.py` runs one fixed-command circle per invocation.
+Record the unloaded reference with the default frozen policy; start a separate
+trial with the same base checkpoint and command and pass `--payload-kg KG`
+and `--method full_oat` or `--method fada_ttt` for loaded online adaptation.
+The payload is applied on the first physics step. Each run stops at 360 degrees
+of net measured body yaw in the commanded direction, termination, or the
+`--duration-s` timeout. The trajectory need not return to the starting point.
+`trajectory.npz` retains all poses and actual payload telemetry. The printed
+result reports circle shape for completed turns; `raw/` supports offline velocity
+evaluation on an explicitly matched time window across methods.
+
 ## Headless OAT component trials
 
 `scripts/run_oat_experiment.py` runs one explicitly selected group and seed without

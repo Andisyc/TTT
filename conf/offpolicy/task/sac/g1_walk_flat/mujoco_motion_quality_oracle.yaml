@@ -71,6 +71,8 @@ env:
   gait_phase_enabled: true
   gait_phase_init_mode: offset_phase
   gait_clock_mode: continuous
+  runtime_payload:
+    enabled: false
   control_config:
     action_scale: 1.0
     simulate_action_latency: false
@@ -107,8 +109,8 @@ env:
     kd_multiplier_range: [0.9, 1.1]
     randomize_ground_friction: true
     ground_friction_multiplier_range: [0.8, 1.2]
-    randomize_base_mass: true
-    added_mass_range: [-1.5, 1.5]
+    randomize_base_mass: false
+    added_mass_range: [0.0, 0.0]
     randomize_body_mass: false
     random_com: false
     randomize_gravity: false

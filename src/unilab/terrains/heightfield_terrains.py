@@ -638,3 +638,70 @@ class HfFlatTerrainCfg(SubTerrainCfg):
             flat_patch_sampling=self.flat_patch_sampling,
             rng=rng,
         )
+
+
+@dataclass(kw_only=True)
+class HfSmoothRampTerrainCfg(SubTerrainCfg):
+    """Upward-concave circular arc defined by horizontal length and rise, tangent to the starting flat."""
+
+    horizontal_length_m: float = 4.0
+    approach_length_m: float = 1.0
+    rise_m: float = 0.175
+    horizontal_scale: float = 0.02
+    vertical_scale: float = 0.0001
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.horizontal_length_m) or self.horizontal_length_m <= 0:
+            raise ValueError("circular ramp horizontal length must be finite and positive")
+        if not np.isfinite(self.rise_m) or not 0 <= self.rise_m < self.horizontal_length_m:
+            raise ValueError("circular ramp rise must be finite, nonnegative and less than its horizontal length")
+
+    @property
+    def radius_m(self) -> float:
+        if self.rise_m == 0:
+            raise ValueError("flat ground has no finite circular-arc radius")
+        return (self.horizontal_length_m**2 + self.rise_m**2) / (2.0 * self.rise_m)
+
+    @property
+    def angle_deg(self) -> float:
+        return float(np.rad2deg(2.0 * np.arctan2(self.rise_m, self.horizontal_length_m)))
+
+    @property
+    def slope_start_x(self) -> float:
+        return self.approach_length_m
+
+    @property
+    def slope_end_x(self) -> float:
+        return self.slope_start_x + self.horizontal_length_m
+
+    @property
+    def finish_x(self) -> float:
+        return self.slope_end_x
+
+    def height(self, x: np.ndarray) -> np.ndarray:
+        if self.rise_m == 0:
+            return np.zeros_like(x, dtype=np.float64)
+        distance = np.clip(np.asarray(x) - self.slope_start_x, 0.0, self.horizontal_length_m)
+        radius = self.radius_m
+        # Stable equivalent of R - sqrt(R^2 - x^2), including very shallow arcs.
+        root = np.sqrt(np.maximum(radius**2 - distance**2, 0.0))
+        return distance**2 / (radius + root)
+
+    def function(self, difficulty: float, rng: np.random.Generator) -> TerrainOutput:
+        if not all(np.isfinite(v) and v > 0 for v in (
+            self.approach_length_m, self.horizontal_length_m,
+            self.horizontal_scale, self.vertical_scale,
+        )):
+            raise ValueError("smooth ramp lengths and resolutions must be finite and positive")
+        if self.size[0] / 2 < self.finish_x + 0.5:
+            raise ValueError("circular ramp patch must include the endpoint collision margin")
+        nx, ny = (int(round(v / self.horizontal_scale)) for v in self.size)
+        x = np.linspace(-self.size[0] / 2, self.size[0] / 2, nx)
+        column = np.rint(self.height(x) / self.vertical_scale).astype(np.int32)
+        noise = np.broadcast_to(column[:, None], (nx, ny)).copy()
+        return _make_terrain_output(
+            noise, size=self.size, horizontal_scale=self.horizontal_scale,
+            vertical_scale=self.vertical_scale, base_thickness_ratio=0.0,
+            origin=np.array([self.size[0] / 2, self.size[1] / 2, 0.0]),
+            flat_patch_sampling=self.flat_patch_sampling, rng=rng,
+        )

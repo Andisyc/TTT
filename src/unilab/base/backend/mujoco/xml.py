@@ -469,8 +469,14 @@ def materialize_mujoco_hfield_attached_scene(
     output_path.mkdir(parents=True, exist_ok=True)
     _copy_robot_asset_dir(robot_path, output_path)
 
-    hfield_rel = Path("hfields") / "hfield.png"
-    generated = TerrainGenerator(terrain_cfg).write_png(output_path / hfield_rel)
+    generated = TerrainGenerator(terrain_cfg).write_png(output_path / "hfields" / "hfield.png")
+    # MuJoCo's PNG loader reduces elevations to 8 bits. Its binary format
+    # preserves floating-point heights and is shared by physics and video.
+    hfield_rel = Path("hfields") / "hfield.bin"
+    values = np.flipud(generated.to_uint16()).astype("<f4") / np.float32(65535)
+    with (output_path / hfield_rel).open("wb") as stream:
+        np.asarray(values.shape, dtype="<i4").tofile(stream)
+        values.tofile(stream)
 
     spec = mujoco.MjSpec()
     spec.compiler.autolimits = True
@@ -496,6 +502,12 @@ def materialize_mujoco_hfield_attached_scene(
     root = ET.fromstring(spec.to_xml())
     _strip_attach_prefixes(root)
     _flatten_attach_main_default(root)
+    # A full scene may bring its old plane along with the robot. Replace it,
+    # retaining its name for ground-specific contact sensors.
+    for parent in root.iter():
+        for geom in list(parent):
+            if geom.tag == "geom" and geom.get("name") == geom_name and geom.get("type") == "plane":
+                parent.remove(geom)
     _merge_robot_option(root, robot_path)
     _ensure_generated_hfield_scene_visuals(root, geom_name)
     for fragment_file in fragment_files:

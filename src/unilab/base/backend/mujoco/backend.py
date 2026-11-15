@@ -355,6 +355,10 @@ class MuJoCoBackend(SimBackend):
         )
         self._pre_step_control_fn = None
         self._reward_telemetry = bool(reward_telemetry)
+        if scene.terrain is not None and (self.add_body_sensors or self._reward_telemetry):
+            if scene_context.visual_model_file is None:
+                raise ValueError("terrain telemetry requires a materialized XML scene")
+            self._model_file = scene_context.visual_model_file
         self._model = self._load_base_model()
         self._base_body_id = (
             mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, base_name)
@@ -804,6 +808,22 @@ class MuJoCoBackend(SimBackend):
             alignment=alignment,
             output=output,
         )
+
+    def sample_ground_height(self, xy: np.ndarray) -> np.ndarray:
+        sampler = self.terrain_surface_sampler
+        if sampler is None:
+            raise ValueError("ground height sampling requires a generated heightfield")
+        points = np.asarray(xy, dtype=np.float64)
+        rows, cols = sampler.heights_uint16.shape
+        sx, sy = sampler.size
+        u = np.clip((points[..., 0] / sx + 0.5) * (cols - 1), 0, cols - 1)
+        v = np.clip((0.5 - points[..., 1] / sy) * (rows - 1), 0, rows - 1)
+        i, j = np.floor(u).astype(np.intp), np.floor(v).astype(np.intp)
+        i1, j1 = np.minimum(i + 1, cols - 1), np.minimum(j + 1, rows - 1)
+        a, b = u - i, v - j
+        grid = sampler.heights_uint16
+        value = (1 - b) * ((1 - a) * grid[j, i] + a * grid[j, i1]) + b * ((1 - a) * grid[j1, i] + a * grid[j1, i1])
+        return sampler.z_min + value * (sampler.height_extent / np.iinfo(np.uint16).max)
 
     def get_body_subtree_ids(self, root_body_id: int) -> np.ndarray:
         subtree_ids = {int(root_body_id)}

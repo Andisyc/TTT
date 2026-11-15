@@ -115,10 +115,11 @@ class MotionQualityRewardProvider:
     """Cache metadata at init; all mutable trajectory state lives in env.info."""
 
     def __init__(self, backend: SimBackend, cfg: MotionQualityRewardConfig,
-                 default_angles: np.ndarray, ctrl_dt: float, base_name: str):
+                 default_angles: np.ndarray, ctrl_dt: float, base_name: str, *, terrain_relative: bool = False):
         if backend.backend_type != "mujoco":
             raise ValueError("motion-quality Oracle currently requires MuJoCo")
         self.backend, self.cfg, self.ctrl_dt = backend, cfg, ctrl_dt
+        self.terrain_relative = terrain_relative
         self.default_angles = np.asarray(default_angles)
         self.pose_weights = np.asarray(cfg.pose_weights, dtype=get_global_dtype())
         if self.pose_weights.shape != self.default_angles.shape:
@@ -167,16 +168,22 @@ class MotionQualityRewardProvider:
         if torque.shape != dof_vel.shape:
             raise ValueError("actuator force order must match G1 joint velocity order")
         clearance_pos = np.stack((backend.get_sensor_data("left_foot_pos"), backend.get_sensor_data("right_foot_pos")), axis=1)
+        base_pos = backend.get_base_pos()
+        clearance_heights = clearance_pos[:, :, 2]
+        if self.terrain_relative:
+            base_pos = base_pos.copy()
+            base_pos[:, 2] -= backend.sample_ground_height(base_pos[:, :2])
+            clearance_heights = clearance_heights - backend.sample_ground_height(clearance_pos[:, :, :2])
         sample = MotionQualitySample(
             commands=info["commands"], phase=info["gait_phase"],
-            base_quat=backend.get_base_quat(), base_pos=backend.get_base_pos(),
+            base_quat=backend.get_base_quat(), base_pos=base_pos,
             base_lin_vel_w=backend.get_base_lin_vel(),
             base_ang_vel_w=backend.get_body_ang_vel_w(self.base_id)[:, 0],
             dof_pos=backend.get_dof_pos(), dof_vel=dof_vel,
             dof_acc=(dof_vel - info["mq_prev_dof_vel"]) / self.ctrl_dt,
             torques=torque, actions=info["current_actions"], last_actions=info["last_actions"],
             feet_pos_w=feet_pos, feet_vel_w=feet_vel, feet_quat_w=feet_quat,
-            clearance_heights=clearance_pos[:, :, 2],
+            clearance_heights=clearance_heights,
             clearance_vel_w=backend.get_site_lin_vel_w(self.site_ids),
             feet_contact=contacts[:, self.feet_columns],
             undesired_contact=contacts[:, self.undesired_columns],

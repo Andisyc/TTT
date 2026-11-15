@@ -177,6 +177,19 @@ model or simulator. PASS requires clean debugger termination for the cancelled
 collector and a complete main-process core with registers and native backtrace.
 Formal training arguments and collection request timeouts are unchanged.
 
+### Oracle and Planner-IDM without payload randomization
+
+`task=sac/g1_walk_flat/mujoco_motion_quality_oracle` disables base-mass
+randomization (`added_mass_range=[0, 0]`), body-mass randomization, COM
+randomization, and runtime payloads. Reset-pose, PD-gain, friction, and sensor
+noise settings are retained.
+
+Train a fresh Oracle without resume. Then pass its checkpoint explicitly to
+the capture launcher using `--teacher-checkpoint /absolute/path/model_50000.pt`.
+The launcher no longer embeds a historical Oracle path. Planner-IDM collection
+inherits the environment saved inside that Oracle checkpoint; changing YAML
+does not remove mass randomization from an already trained Oracle.
+
 ## Repeating FADA figure-eight recordings
 
 `recording_profile=figure_eight` publishes a repeating open-loop body-frame velocity

@@ -149,14 +149,17 @@ class G1WalkEnv(
 
         motion_quality = isinstance(cfg.reward_config, MotionQualityRewardConfig)
         self._motion_quality_provider = None
+        slope_evaluation = cfg.slope_evaluation is not None
+        if slope_evaluation and (backend_type != "mujoco" or cfg.scene.terrain is None):
+            raise ValueError("slope evaluation requires a generated MuJoCo terrain")
         if motion_quality and (
             backend_type != "mujoco"
             or cfg.scene.fragment_files
-            or cfg.scene.terrain is not None
+            or (cfg.scene.terrain is not None and not slope_evaluation)
             or epath.Path(cfg.scene.model_file).read_bytes()
             != (ASSETS_ROOT_PATH / "robots/g1/scene_flat.xml").read_bytes()
         ):
-            raise ValueError("motion-quality rewards require the canonical MuJoCo flat scene")
+            raise ValueError("motion-quality playback requires the canonical scene and an explicit slope evaluation config for terrain")
         if cfg.reward_config is None:
             raise ValueError("reward_config must be provided via Hydra configuration")
         if cfg.reward_config.scales.get("feet_phase", 0.0) != 0.0 and cfg.reward_config.feet_phase_mode in {
@@ -266,7 +269,8 @@ class G1WalkEnv(
             from unilab.envs.locomotion.g1.motion_quality_reward import MotionQualityRewardProvider
 
             self._motion_quality_provider = MotionQualityRewardProvider(
-                backend, cfg.reward_config, self.default_angles, cfg.ctrl_dt, cfg.asset.base_name
+                backend, cfg.reward_config, self.default_angles, cfg.ctrl_dt, cfg.asset.base_name,
+                terrain_relative=slope_evaluation,
             )
         self._init_reward_functions()
         self._fada_base_kp: np.ndarray | None = None
@@ -353,6 +357,10 @@ class G1WalkEnv(
         self._runtime_payload.reconcile_info(state.info)
         self._runtime_payload.before_physics(state.info)
         return super().apply_action(actions, state)
+
+    def request_runtime_payload_mass(self, added_mass_kg: float) -> None:
+        """Queue the next configured cumulative payload for this single-env trial."""
+        self._runtime_payload.request_next_mass(self.state.info, added_mass_kg)
 
     def reset(self, env_indices: np.ndarray) -> tuple[dict[str, np.ndarray], dict]:
         if self._state is not None:

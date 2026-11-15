@@ -11,6 +11,7 @@ import numpy as np
 from unilab.assets import ASSETS_ROOT_PATH
 from unilab.base import registry
 from unilab.base.scene import SceneCfg
+from unilab.terrains.heightfield_terrains import HfSmoothRampTerrainCfg
 from unilab.envs.locomotion.common.commands import (
     Commands,
 )
@@ -425,13 +426,21 @@ class G1RuntimePayloadConfig:
     attach_time_s: float = 10.0
     # Absolute episode time (s), then incremental kg, at the same box location.
     additional_mass_events: list[list[float]] = field(default_factory=list)
+    requested_mass_levels_kg: list[float] = field(default_factory=list)
 
     def validate(self) -> None:
         if not self.enabled:
             return
         if not str(self.body_name).strip():
             raise ValueError("env.runtime_payload.body_name must be non-empty")
-        if not math.isfinite(float(self.added_mass_kg)) or float(self.added_mass_kg) <= 0.0:
+        if self.requested_mass_levels_kg:
+            levels = np.asarray(self.requested_mass_levels_kg, dtype=np.float64)
+            if self.added_mass_kg != 0 or self.additional_mass_events:
+                raise ValueError("requested payload levels cannot be combined with timed payloads")
+            if (levels.ndim != 1 or not np.isfinite(levels).all()
+                    or levels[0] <= 0 or np.any(np.diff(levels) <= 0)):
+                raise ValueError("requested payload levels must be finite, positive and increasing")
+        elif not math.isfinite(float(self.added_mass_kg)) or float(self.added_mass_kg) <= 0.0:
             raise ValueError("env.runtime_payload.added_mass_kg must be finite and positive")
         position = np.asarray(self.attachment_pos_m, dtype=np.float64)
         if position.shape != (3,) or not np.isfinite(position).all():
@@ -496,6 +505,7 @@ class G1WalkEnvCfg(G1BaseCfg):
         )
     )
     max_episode_seconds: float = 20.0
+    slope_evaluation: HfSmoothRampTerrainCfg | None = None
     init_state: InitState = field(default_factory=InitState)
     commands: G1WalkCommandsConfig = field(default_factory=G1WalkCommandsConfig)
     reward_config: G1RewardConfig | None = None

@@ -258,7 +258,10 @@ class G1WalkRewardBindings:
         return failure
 
     def _terrain_relative_base_height(self) -> np.ndarray:
-        return np.asarray(self._backend.get_base_pos()[:, 2], dtype=get_global_dtype())
+        base = self._backend.get_base_pos()
+        if self._cfg.slope_evaluation is not None:
+            return np.asarray(base[:, 2] - self._backend.sample_ground_height(base[:, :2]), dtype=get_global_dtype())
+        return np.asarray(base[:, 2], dtype=get_global_dtype())
 
     def _gait_constraint_cfg(self) -> GaitConstraintConfig:
         cfg = getattr(self._reward_cfg, "gait_constraint", GaitConstraintConfig())

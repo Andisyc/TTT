@@ -124,6 +124,7 @@ class FADAPlaybackRendering:
             camera.elevation = self.args.camera_elevation
         if self.args.camera_azimuth is not None:
             camera.azimuth = self.args.camera_azimuth
+        far_m = 0.0
         if self.config.enabled and not self.args.camera_follow_body and self.reference_route is not None:
             # Enclose the route and the standing robot in a sphere. Fitting a
             # square viewport also covers landscape preview/video viewports.
@@ -133,10 +134,16 @@ class FADAPlaybackRendering:
             radius = np.linalg.norm(high - low) / 2.0 + self.config.camera_margin_m
             if self.args.camera_distance is None:
                 camera.distance = radius / math.sin(math.radians(float(self.model.vis.global_.fovy)) / 2.0)
+            far_m = 1.1 * (float(camera.distance) + float(radius))
             self._fixed_camera = (
                 camera.lookat.copy(), float(camera.distance),
                 float(camera.elevation), float(camera.azimuth),
             )
+        # Wide shots need ground coverage beyond the robot or the nominal route.
+        far_m = max(far_m, 2.5 * float(camera.distance))
+        self.model.vis.map.zfar = max(
+            float(self.model.vis.map.zfar), far_m / float(self.model.stat.extent),
+        )
 
     def update_camera(self, camera: Any, data: Any) -> None:
         if self._fixed_camera is not None:

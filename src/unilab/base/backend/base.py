@@ -199,6 +199,10 @@ class SimBackend(abc.ABC):
             f"{self.__class__.__name__} does not support native height-field scanners"
         )
 
+    def sample_ground_height(self, xy: np.ndarray) -> np.ndarray:
+        """Sample generated terrain at world XY coordinates, without exposing backend internals."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not expose terrain height sampling")
+
     def get_body_subtree_ids(self, root_body_id: int) -> np.ndarray:
         """Return body ids in the subtree rooted at ``root_body_id``."""
         raise NotImplementedError(f"{self.__class__.__name__} does not expose body subtree ids")

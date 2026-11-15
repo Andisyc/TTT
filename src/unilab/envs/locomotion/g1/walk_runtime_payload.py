@@ -21,8 +21,8 @@ class G1RuntimePayload:
 
     Per-row active/event/added-mass truth lives in the ``state.info`` arrays so
     rollout snapshot/restore stays consistent; this owner keeps only
-    preallocated scratch masks plus the immutable baseline mass/COM and the
-    derived attach schedule. Only public ``SimBackend`` methods are used.
+    scratch masks, the immutable baseline and schedule, and a one-step external
+    request for single-environment playback. Only public ``SimBackend`` methods are used.
     """
 
     def __init__(
@@ -36,7 +36,8 @@ class G1RuntimePayload:
         self._backend = backend
         self._num_envs = int(num_envs)
         self._enabled = bool(config.enabled)
-        self._stages: list[tuple[int, float, np.ndarray, np.ndarray]] = []
+        self._stages: list[tuple[int | None, float, np.ndarray, np.ndarray]] = []
+        self._pending_mass: float | None = None
         self._body_ids: np.ndarray | None = None
         self._baseline_mass = 0.0
         self._baseline_com = np.zeros(3, dtype=np.float64)
@@ -45,6 +46,8 @@ class G1RuntimePayload:
         if not self._enabled:
             return
         config.validate()
+        if config.requested_mass_levels_kg and self._num_envs != 1:
+            raise ValueError("requested payload levels require single-environment playback")
         if backend.backend_type != "mujoco":
             raise ValueError("runtime payload currently requires the MuJoCo backend")
         if not math.isfinite(ctrl_dt) or ctrl_dt <= 0.0:
@@ -69,11 +72,17 @@ class G1RuntimePayload:
         half_size = np.asarray(config.half_size_m, dtype=np.float64)
         displacement = position - self._baseline_com
         hx2, hy2, hz2 = half_size * half_size
-        added_mass = 0.0
-        events = [(float(config.attach_time_s), float(config.added_mass_kg))]
-        events.extend((float(time_s), float(increment)) for time_s, increment in config.additional_mass_events)
-        for time_s, increment in events:
-            added_mass += increment
+        if config.requested_mass_levels_kg:
+            stages = [(None, float(mass)) for mass in config.requested_mass_levels_kg]
+        else:
+            events = [(float(config.attach_time_s), float(config.added_mass_kg))]
+            events.extend((float(t), float(increment)) for t, increment in config.additional_mass_events)
+            added_mass = 0.0
+            stages = []
+            for time_s, increment in events:
+                added_mass += increment
+                stages.append((int(math.ceil(time_s / ctrl_dt)), added_mass))
+        for attach_step, added_mass in stages:
             target_mass = self._baseline_mass + added_mass
             target_com = self._baseline_com + (added_mass / target_mass) * displacement
             box_inertia = np.diag(
@@ -83,7 +92,7 @@ class G1RuntimePayload:
             target_inertia = self._baseline_inertia + box_inertia + reduced_mass * (
                 np.dot(displacement, displacement) * np.eye(3) - np.outer(displacement, displacement)
             )
-            self._stages.append((int(math.ceil(time_s / ctrl_dt)), added_mass, target_com, target_inertia))
+            self._stages.append((attach_step, added_mass, target_com, target_inertia))
 
     @property
     def enabled(self) -> bool:
@@ -117,8 +126,17 @@ class G1RuntimePayload:
         event.fill(False)
         added[~active] = 0.0
 
+    def request_next_mass(self, info: dict, added_mass_kg: float) -> None:
+        """Queue the next configured cumulative mass for the next physics step."""
+        current = float(info[TRUTH_KEY_ADDED_MASS][0])
+        next_mass = next((mass for step, mass, _, _ in self._stages if step is None and mass > current), None)
+        if self._pending_mass is not None or next_mass is None or added_mass_kg != next_mass:
+            raise ValueError("expected one request for the next configured payload level")
+        self._pending_mass = next_mass
+
+
     def before_physics(self, info: dict) -> None:
-        """Attach the payload at the scheduled episode step, before the physics step."""
+        """Apply timed and explicitly requested payload changes before physics."""
 
         if not self._enabled:
             return
@@ -128,7 +146,12 @@ class G1RuntimePayload:
         steps = np.asarray(info["steps"])
         added = info[TRUTH_KEY_ADDED_MASS]
         for attach_steps, added_mass, target_com, target_inertia in self._stages:
-            np.greater_equal(steps, attach_steps, out=self._scratch)
+            if attach_steps is None:
+                if self._pending_mass != added_mass:
+                    continue
+                self._scratch.fill(True)
+            else:
+                np.greater_equal(steps, attach_steps, out=self._scratch)
             self._scratch[added >= added_mass] = False
             if not np.any(self._scratch):
                 continue
@@ -145,6 +168,8 @@ class G1RuntimePayload:
             active[env_ids] = True
             event[env_ids] = True
             added[env_ids] = added_mass
+            if attach_steps is None:
+                self._pending_mass = None
 
     def reset_info_updates(self, env_indices: np.ndarray) -> dict[str, np.ndarray]:
         """Zeroed per-row truth values for the reset info carrier."""
@@ -164,6 +189,7 @@ class G1RuntimePayload:
         reset_rows = np.asarray(env_indices, dtype=np.int64).reshape(-1)
         if reset_rows.size == 0:
             return
+        self._pending_mass = None
         # Cold init: truth arrays may not exist yet (init_info runs after super().init_state()).
         if TRUTH_KEY_ACTIVE not in info:
             return

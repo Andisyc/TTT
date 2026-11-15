@@ -94,6 +94,22 @@ def build_oracle_student_play_env_cfg(
         if restored.get(name) != environment.get(name):
             raise ValueError(f"Oracle student playback cannot override source {name}")
     restored["reward_config"] = build_motion_quality_reward_config(restored["reward_config"])
+    slope = OmegaConf.select(cfg, "env.slope_evaluation", default=None)
+    if slope is not None:
+        from unilab.base.scene import SceneCfg, TerrainSceneCfg
+        from unilab.terrains.heightfield_terrains import HfSmoothRampTerrainCfg
+        from unilab.terrains.terrain_generator import TerrainGeneratorCfg
+
+        ramp = HfSmoothRampTerrainCfg(**cast(dict[str, Any], OmegaConf.to_container(slope, resolve=True)))
+        # Keep the checkpoint's asset tree intact; materialize only the evaluation surface.
+        restored["slope_evaluation"] = ramp
+        restored["scene"] = SceneCfg(
+            model_file=environment["scene"]["model_file"],
+            terrain=TerrainSceneCfg(generator=TerrainGeneratorCfg(
+                size=ramp.size, horizontal_scale=ramp.horizontal_scale, vertical_scale=ramp.vertical_scale,
+                seed=0, sub_terrains={"smooth_ramp": ramp},
+            ), geom_name="floor"),
+        )
     return cast(dict[str, Any], restored)
 
 

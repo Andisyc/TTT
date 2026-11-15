@@ -39,16 +39,139 @@ The command prints position RMSE at matching command steps, after aligning the
 entry positions and headings. An incomplete cycle has no RMSE; a missed crossing
 is scored normally.
 
-`scripts/run_circle_demo.py` runs one fixed-command circle per invocation.
+`scripts/run_circle_demo.py` runs optional fixed-command adaptation followed by one measured circle.
 Record the unloaded reference with the default frozen policy; start a separate
 trial with the same base checkpoint and command and pass `--payload-kg KG`
 and `--method full_oat` or `--method fada_ttt` for loaded online adaptation.
-The payload is applied on the first physics step. Each run stops at 360 degrees
+With `--payload-kg 0`, attaching a payload is disabled. Explicitly selecting
+`full_oat` or `fada_ttt` still enables online adaptation during the approach;
+use `--method frozen` for a no-LoRA reference.
+Use `--payload-side right` to mount the payload on the right shoulder; the
+default is `left`.
+Use `--seed SEED` to set the run seed (default: `0`).
+Use `--update-interval T` to override the online update interval in control
+steps; omission retains the protocol setting (currently 5). The sample window
+size follows T through the protocol interpolation. With a 0.02 s control
+period, `--update-interval 10` checks for an update every 0.2 s; warmup and
+data readiness still gate actual updates. `--seed` and `--update-interval`
+are argparse flags, not bare Hydra dotted overrides.
+Pass `--approach-s SECONDS` to adapt before measurement, without a reset.
+`--forward-m-s` sets the adaptation speed and the default measurement speed.
+Use `--test-forward-m-s` to change only the measurement speed. `--yaw-rate-rad-s`
+sets the measurement yaw rate and the default adaptation yaw rate. Use
+`--approach-yaw-rate-rad-s` to change only the adaptation yaw rate; `0` makes
+the adaptation phase straight. Positive rates turn left and negative rates turn right.
+With a nonzero adaptation phase, online methods freeze their learned weights
+at measurement entry unless `--keep-updating` is supplied.
+The payload is applied on the first physics step by default; use
+`--payload-attach-s` to delay attachment from trial start. `--startup-s` is the
+initial part of `--approach-s` during which online updates are disabled.
+Each run stops at 360 degrees
 of net measured body yaw in the commanded direction, termination, or the
-`--duration-s` timeout. The trajectory need not return to the starting point.
-`trajectory.npz` retains all poses and actual payload telemetry. The printed
-result reports circle shape for completed turns; `raw/` supports offline velocity
-evaluation on an explicitly matched time window across methods.
+`--duration-s` timeout for the circle phase. The trajectory need not return to
+the starting point. `trajectory.npz` retains both phases, actual payload telemetry,
+and `circle_start_step` (`-1` if the trial ended before measurement). Video
+starts at measurement entry by default. Pass `--record-from-start` to include
+adaptation in the same `trial.mp4`; the camera follows the robot when recording
+both phases. `recording_start_step` records the video origin. Shape scoring
+and the one-lap yaw counter still start at measurement entry.
+At trial end, velocity RMSE is calculated automatically from `raw/` over the
+measured segment, excluding adaptation; `velocity/` retains the evaluation.
+`summary.json` saves full-precision results and the final output/video paths.
+The output directory gains the suffix `_E_shape_<value>_E_lin_<value>_E_ang_<value>_E_rad_<value>_R_<value>`;
+the video inside keeps the name `trial.mp4`. Values use three significant
+digits (not three decimal places). `E_lin` is body-XY
+linear velocity RMSE in m/s, `E_ang` is body-Z angular velocity RMSE in rad/s,
+`E_rad` is radial RMSE about the fitted circle in metres, and `R` is its radius
+in metres; no unloaded-reference normalization is inferred. Incomplete laps
+include `_incomplete_<stop_reason>` in the directory name, report only observed
+velocity diagnostics and use `NA` for unavailable geometry. A trial that ends
+before measurement has no test score. Its video is saved only if recording
+started with `--record-from-start`; the failure summary is saved either way.
+Directory-name formatting retains trailing zeros when needed for three
+significant digits (for example, `2.00`); saved JSON metrics are not rounded.
+The terminal JSON reports `output_dir` and `video_path` after renaming;
+the evaluation summary paths are updated to the renamed directory as well.
+Supply `--reference /path/to/unloaded/trajectory.npz` to compute `E_shape`
+against a separate unloaded frozen trial. The measured command, control
+period, initial checkpoint and seed must match. Adaptation/startup differences
+are recorded under `shape_comparison.adaptation_protocol_differences`, not
+silently discarded or used to reject the explicitly selected reference.
+Only measured-lap entry positions and body headings are aligned, then both
+paths are sampled at 1001 equal normalized arc-length positions. The XY RMSE
+is in metres; no scale or best-fit-circle alignment is applied. Without an
+explicit reference, `E_shape` is `NA`; incomplete laps remain DNF, not scored
+as complete circles. `shape_comparison` in `summary.json` records the reference,
+status and full-precision result.
+Use the reference trajectory's final renamed output directory, as printed
+in that reference run's terminal result.
+
+`scripts/run_straight_line_demo.py` is the independent Straight Line protocol.
+At the default 0.4 m/s it runs 20 seconds of online approach, applies the
+selected shoulder payload at 5 seconds, then freezes without resetting and
+records a fixed 12.5-second test (5 metres of commanded travel, not measured travel).
+Use `--method full_oat --payload-kg KG` or `--method fada_ttt --payload-kg KG`;
+the default `frozen` / zero payload records an unloaded baseline with the same prefix.
+`--seed`, `--payload-side`, `--gamma` (OAT default 0.5), `--approach-s`,
+`--payload-attach-s`, `--forward-m-s` and `--duration-s` configure the trial.
+`--update-interval T` selects the update-check interval in control steps (default: 5);
+the existing window-capacity convention follows the same value.
+`--keep-updating` continues learning during the test for online methods instead
+of freezing at entry. The metric window stays unchanged; the test-start event
+records whether updates remain active.
+`summary.json` reports `geometry.line_rmse_m` as the main straightness metric
+E_line: resample the horizontal test trajectory at 1001 equal-arc-length points,
+fit one orthogonal least-squares line to the entire path, then compute perpendicular
+distance RMSE. Maximum line deviation, path length, forward progress and the
+existing body-frame/completed-step velocity errors are also recorded.
+`geometry.direction_error_deg` (E_dir) is the angle in degrees between the
+same fitted line's forward direction and the fixed entry body heading. The
+line direction is oriented using endpoint displacement, preserving a 180-degree
+error for backward travel. Zero net direction or an ambiguous principal axis
+leaves this metric null and prints `E_dir: x`; it is not an instantaneous gyro
+or velocity-direction error.
+The terminal prints the same E_line; an incomplete test or zero-travel path
+prints `E_line: x` rather than a false full-test score. Forward distance and
+auxiliary lateral offsets still use the entry body heading, not the fitted line.
+Early termination retains raw data but leaves full-test scores null;
+no test video is produced if the robot never reaches the test phase by default.
+`trajectory.npz` includes both phases and `test_start_step`; `trial.mp4` contains
+only the frozen test unless `--record-from-start` is supplied. This flag records
+from time zero, including approach failures, without changing the scoring window.
+The visual camera's far clipping range expands with the framed route length;
+this does not change the physics model or the scored trajectory.
+`recording_start_step` records the video's origin. No route-success percentage
+or normalized velocity score is inferred.
+
+`scripts/run_slope_demo.py` records an uninterrupted uphill trial.
+`--length-m` sets the horizontal ramp length (default: 4 m), excluding the
+flat lead-in; `--rise-m` independently sets the endpoint height above that
+flat (default: 0.175 m). With `--rise-m 0`, the same length selects a flat
+test segment. These replace `--slope-deg` and `--flat-length-m`.
+The surface remains an upward-concave circular arc tangent to the lead-in.
+The maximum local slope is derived from the length and rise, not prescribed;
+for 4 m and 0.175 m it is about 5.01 degrees. A nonvertical circular arc
+requires a nonnegative rise smaller than its horizontal length.
+Defaults are OAT, 0.4 m/s, zero payload and no additional pre-adaptation.
+Recording stops at the endpoint; the equal-height collision margin beyond
+it is not part of the task.
+Heightfield geometry is materialized once, with checkpoint control and asset
+validation retained. Online updates remain enabled on the slope, including
+when `--approach-s` adds a longer flat prefix. Payload mass, side and attachment
+time remain optional. Video starts at time zero; `raw/` and `trajectory.npz`
+retain failures, slope entry/exit events and actual payload telemetry.
+`summary.json` reports completion and arc-segment lateral RMSE; incomplete
+courses have no full-course score. `--duration-s` sets the timeout after the
+optional flat prefix. Each invocation is an independent trial, not a success rate.
+`--yaw-rate-rad-s` adds a constant yaw command (default: 0; positive left,
+negative right) for open-loop checkpoint calibration. It does not use position
+or heading feedback; the scored reference remains the original straight +X
+line. Calibrate unloaded with `--method frozen` and reuse the same command
+across methods rather than tuning each method separately.
+For `model/new_best/student_iter_0031.pt`, the unloaded 0-degree, 4 m segment
+at 0.4 m/s was calibrated with `--yaw-rate-rad-s -0.021` (seed 0). This is a
+finite-course calibration, not a guarantee of straightness at other speeds,
+on slopes, or over longer distances.
 
 ## Headless OAT component trials
 

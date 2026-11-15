@@ -130,12 +130,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture-root", type=Path, required=True)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--teacher-checkpoint", type=Path, help="Oracle checkpoint whose saved environment owns collection")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--full-training", action="store_true")
     parser.add_argument("--allocator", choices=("default", "debug"), default="default")
     parser.add_argument("--seconds", type=int, default=600)
     parser.add_argument("--core-gib", type=int, default=20)
     args = parser.parse_args()
+    if not args.self_test:
+        if args.teacher_checkpoint is None:
+            parser.error("--teacher-checkpoint is required; pass the Oracle trained for this experiment")
+        args.teacher_checkpoint = args.teacher_checkpoint.expanduser().resolve()
+        if not args.teacher_checkpoint.is_file():
+            parser.error(f"Oracle checkpoint not found: {args.teacher_checkpoint}")
     root, repo = args.capture_root, args.repo.resolve()
     if not root.is_absolute() or root == repo or root.exists():
         parser.error("--capture-root must be a new absolute directory, not the repo root")
@@ -187,7 +194,7 @@ def main() -> int:
         command = [sys.executable, "-u", "-c", fixture]
     else:
         command = [sys.executable, "-u", "scripts/train_distill.py", "--config-name=oracle_fada",
-                   "teacher.checkpoint_path=/ssd1/cyx/TTT/logs/oracle/mirror_yaw025_50k_20261108-054124/model_50000.pt",
+                   f"teacher.checkpoint_path={args.teacher_checkpoint}",
                    "training.device=cuda", "training.fada.num_envs=22",
                    "training.fada.batch_size=4096", "training.fada.replay_capacity=524288",
                    "training.fada.windows_per_iteration=131072", "training.fada.iterations=31",

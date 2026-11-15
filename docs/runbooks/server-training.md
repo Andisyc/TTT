@@ -183,6 +183,9 @@ Formal training arguments and collection request timeouts are unchanged.
 randomization (`added_mass_range=[0, 0]`), body-mass randomization, COM
 randomization, and runtime payloads. Reset-pose, PD-gain, friction, and sensor
 noise settings are retained.
+Oracle validation accepts both disabled base-mass DR and historical enabled
+base-mass DR within `[-1.5, 1.5]` kg, preserving old checkpoint readability.
+It still requires a boolean switch and retains the other randomization limits.
 
 Train a fresh Oracle without resume. Then pass its checkpoint explicitly to
 the capture launcher using `--teacher-checkpoint /absolute/path/model_50000.pt`.

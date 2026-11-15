@@ -150,8 +150,10 @@ def validate_oracle_config(cfg: DictConfig) -> OracleInterface:
         ("added_mass_range", -1.5, 1.5),
     ):
         _range(cfg, f"env.domain_rand.{name}", lower, upper)
-    for name in ("randomize_kp", "randomize_kd", "randomize_ground_friction", "randomize_base_mass"):
+    for name in ("randomize_kp", "randomize_kd", "randomize_ground_friction"):
         _require(cfg, f"env.domain_rand.{name}", True)
+    if not isinstance(_value(cfg, "env.domain_rand.randomize_base_mass"), bool):
+        raise ValueError("env.domain_rand.randomize_base_mass must be a boolean")
 
     limits = _value(cfg, "env.commands.vel_limit")
     if (

@@ -1,9 +1,0 @@
-design=FADA-COLLECTION-ENV-LIFECYCLE-20260831
-checkout=main@18f4eb4055af929ef5e5a5ad5e9c443bc69b10fd
-diff_sha256=1613e14734103072ab4f960c8a832723758ed1c9d3b074c4865bb6e96e4558c7
-files=src/unilab/algos/torch/distill/fada/async_runtime.py,src/unilab/algos/torch/distill/fada/async_collection.py,tests/algos/test_fada_async_worker.py
-red=2 selected lifecycle tests failed before production edits because collection bypassed collection_environment
-focused_green=40 passed
-affected_green=1028 passed,1 skipped,13 deselected
-static=ruff check pass,ruff format check pass,pyright 0 errors,compileall pass,git diff check pass
-live=not-run
